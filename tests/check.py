@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """predator-control tests. ssh is STUBBED (a fake Predator in memory): nothing here switches or touches the real machine.
 `python3 tests/check.py --live` additionally does ONE read-only real status read (mode.ps1 -Status + the catalog file)."""
-import json, os, sys, tempfile, threading, time, urllib.request, urllib.error
+import importlib.util, json, os, sys, tempfile, threading, time, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -189,6 +189,70 @@ lf = Path(tmp) / "data/actions.log"
 lines = [json.loads(x) for x in lf.read_text().splitlines()]
 check(len(lines) >= 8 and all(set(e) == {"t", "action", "detail", "result", "override"} for e in lines), "log file has only time/action/detail/result")
 check(call("/api/log")[1]["log"], "log endpoint works")
+
+# ---- LOCAL mode (server runs ON Predator): commands run directly; Windows-path logic under a fake ----
+import subprocess, importlib
+calls, popens = [], []
+class CP:  # CompletedProcess stand-in
+    def __init__(s, out="", rc=0): s.stdout, s.returncode = out, rc
+task_exists = [True]
+def fake_run(cmd, **kw):
+    calls.append((cmd, kw))
+    assert not (isinstance(cmd, list) and cmd and cmd[0] == "ssh"), "ssh used in LOCAL mode"
+    if "schtasks /run /tn PredatorComfyUI" in cmd:
+        return CP("", 0 if task_exists[0] else 1)
+    return CP("7\n")
+def fake_popen(args, **kw):
+    popens.append((args, kw))
+    if kw.get("creationflags", 0) & 0x01000000 and BREAKAWAY_DENIED[0]:
+        raise PermissionError("breakaway denied")
+BREAKAWAY_DENIED = [False]
+real_run, real_popen = subprocess.run, subprocess.Popen
+with tempfile.TemporaryDirectory() as cd:
+    saved = (S.LOCAL, S.IS_WIN, S.COMFY_DIR)
+    S.LOCAL, S.IS_WIN, S.COMFY_DIR = True, True, cd
+    subprocess.run, subprocess.Popen = fake_run, fake_popen
+    try:
+        # real remote()/spawn_comfy() from source, not the stubs
+        src = importlib.util.spec_from_file_location("server_local", S.__file__)
+        L = importlib.util.module_from_spec(src); os.environ["PREDATOR_LOCAL"] = "1"; src.loader.exec_module(L)
+        L.IS_WIN, L.COMFY_DIR = True, cd
+        check(L.LOCAL is True, "PREDATOR_LOCAL=1 turns LOCAL mode on")
+        check(L.IMAGINE_URL.startswith("http://100.96.201.27:"), "LOCAL default Imagine URL is dcmini's tailnet address")
+        out = L.remote(L.MODE_PS)
+        c, kw = calls[-1]
+        check(out == "7\n" and c == L.MODE_PS and kw["shell"] is True and kw["creationflags"] == L.CREATE_NO_WINDOW,
+              "LOCAL remote(): same fixed command, run directly via cmd shell, no window, no ssh")
+        L.spawn_comfy()
+        check(calls[-1][0] == "schtasks /run /tn PredatorComfyUI" and not popens, "LOCAL comfy start = run the PredatorComfyUI task")
+        task_exists[0] = False
+        L.spawn_comfy()
+        a, kw = popens[-1]
+        check(a[0].replace("\\", "/").endswith("venv/Scripts/python.exe") and a[1:3] == ["main.py", "--listen"] and kw["cwd"] == cd
+              and kw["creationflags"] & 0x01000000 and kw["creationflags"] & 0x00000008, "no task: detached direct start with job breakaway")
+        BREAKAWAY_DENIED[0] = True
+        L.spawn_comfy()
+        check(not popens[-1][1]["creationflags"] & 0x01000000 and len(popens) == 3, "breakaway forbidden: retries without it")
+        check((Path(cd) / "server.log").exists(), "ComfyUI log file opened in COMFY_DIR")
+        os.environ["LOCALAPPDATA"] = r"C:\Users\dcmini\AppData\Local"
+        os.environ.pop("PREDATOR_CONTROL_DATA", None)
+        check(str(L.default_data()).replace("\\", "/").endswith("AppData/Local/predator-control"), "data dir derived from LOCALAPPDATA")
+        os.environ["PREDATOR_LOCAL"] = "0"
+        src.loader.exec_module(L)
+        check(L.LOCAL is False and L.IMAGINE_URL == "http://127.0.0.1:8791", "PREDATOR_LOCAL=0 keeps ssh mode defaults")
+    finally:
+        subprocess.run, subprocess.Popen = real_run, real_popen
+        S.LOCAL, S.IS_WIN, S.COMFY_DIR = saved
+        os.environ.pop("PREDATOR_LOCAL", None)
+# Imagine unreachable = unknown, not an error
+S.IMAGINE_URL = "http://127.0.0.1:9"
+check(S.imagine_jobs() is None, "Imagine unreachable -> None (unknown)")
+S.cache["t"] = 0
+check(call("/api/status")[1]["imagine"] is None, "status still works with Imagine unreachable")
+# deploy bundle copies must match the source
+for f in ("server.py", "index.html"):
+    b = Path(S.__file__).parent / "deploy/predator" / f
+    check(b.exists() and b.read_bytes() == (Path(S.__file__).parent / f).read_bytes(), f"deploy/predator/{f} is in sync (run deploy/sync.sh)")
 
 if "--live" in sys.argv:
     import importlib; importlib.reload(S)  # real remote(), read-only calls only

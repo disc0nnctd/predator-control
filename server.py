@@ -3,7 +3,8 @@
 
 Listens on 127.0.0.1:8793 (publish tailnet-only with `tailscale serve --bg --https=8793 http://127.0.0.1:8793`).
 
-Everything goes to Predator over SSH with FIXED commands only: the single piece of variable text is an LLM model key, and
+Everything goes to Predator over SSH (or, with PREDATOR_LOCAL=1 / auto on Windows, directly on this machine when the server
+runs ON Predator) with FIXED commands only: the single piece of variable text is an LLM model key, and
 it is accepted only if it appears in Predator's own model catalog (and matches a strict pattern). Mode switches use the
 existing HermesMode mechanism (mode_request.txt + `schtasks /run /tn HermesMode`), the same as SysBear and chat-styles.
 Nothing here reads or stores prompts or model text; the action log holds time, action, short detail (mode/model key), result.
@@ -13,10 +14,27 @@ import collections, hmac, json, os, re, secrets, subprocess, threading, time, ur
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+IS_WIN = os.name == "nt"
+# LOCAL mode: this server runs ON Predator, so every "remote" command is run directly on this machine instead of over ssh.
+# PREDATOR_LOCAL=1 forces it, =0 forces ssh mode, unset = automatic (on when running on Windows).
+_PL = os.environ.get("PREDATOR_LOCAL", "").strip().lower()
+LOCAL = True if _PL in ("1", "true", "yes", "on") else False if _PL in ("0", "false", "no", "off") else IS_WIN
 PORT = int(os.environ.get("PREDATOR_CONTROL_PORT", 8793))
-DATA = Path(os.environ.get("PREDATOR_CONTROL_DATA", Path.home() / ".local/share/predator-control"))
+
+
+def default_data():
+    if LOCAL and IS_WIN:
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "predator-control"
+    return Path.home() / ".local/share/predator-control"
+
+
+DATA = Path(os.environ.get("PREDATOR_CONTROL_DATA", default_data()))
 PAGE = Path(__file__).with_name("index.html")
-IMAGINE_URL = os.environ.get("IMAGINE_URL", "http://127.0.0.1:8791")  # job COUNTS only
+# Imagine job COUNTS only. On Predator, Imagine lives on dcmini: reach it by its tailnet address (unreachable = unknown).
+IMAGINE_URL = os.environ.get("IMAGINE_URL", "http://100.96.201.27:8791" if LOCAL else "http://127.0.0.1:8791")
+COMFY_DIR = os.environ.get("COMFY_DIR", r"D:\ComfyUI")
+COMFY_TASK = os.environ.get("COMFY_TASK", "PredatorComfyUI")  # scheduled task that starts ComfyUI (see deploy/predator)
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 HOST = os.environ.get("PREDATOR_HOST", "dcmini@100.105.14.41")
 SSH = ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes"]
 PRED = r"C:\Users\Public\HermesPredator"
@@ -44,13 +62,47 @@ fails = []
 TOKEN = ""
 
 
+def local_run(cmd, timeout=25):
+    """LOCAL mode: the same fixed command string, run by cmd.exe on this machine (what sshd's default shell would do)."""
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout,
+                          stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW if IS_WIN else 0)
+
+
 def remote(cmd, timeout=25):
-    """A fixed command on Predator over ssh (tests replace this)."""
+    """A fixed command on Predator: over ssh, or directly on this machine in LOCAL mode (tests replace this)."""
+    if LOCAL:
+        return local_run(cmd, timeout).stdout
     return subprocess.run(SSH + [HOST, cmd], capture_output=True, text=True, timeout=timeout).stdout
+
+
+def comfy_python():
+    return str(Path(COMFY_DIR) / "venv" / "Scripts" / "python.exe") if IS_WIN else str(Path(COMFY_DIR) / "venv/bin/python")
+
+
+def spawn_comfy_local():
+    """LOCAL: start ComfyUI so it outlives this request AND this server's restarts. Preferred: run the PredatorComfyUI scheduled
+    task (its own session/job, so it is not killed when PredatorControl is restarted). Fallback: a detached child that breaks
+    away from the task's job object."""
+    r = local_run(f"schtasks /run /tn {COMFY_TASK}", timeout=20)
+    if r.returncode == 0:
+        return
+    log_f = open(Path(COMFY_DIR) / "server.log", "ab")
+    args = [comfy_python(), "main.py", "--listen", "127.0.0.1", "--port", "8188", "--disable-metadata", "--cache-lru", "40"]
+    base = 0x00000008 | 0x00000200 | CREATE_NO_WINDOW  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | no window
+    for flags in (base | 0x01000000, base):  # CREATE_BREAKAWAY_FROM_JOB first; some jobs forbid it
+        try:
+            subprocess.Popen(args, cwd=COMFY_DIR, stdout=log_f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             creationflags=flags, close_fds=True)
+            return
+        except OSError:
+            continue
+    raise RuntimeError("could not start ComfyUI (task and direct start both failed)")
 
 
 def spawn_comfy():
     """Start ComfyUI held by a detached local ssh session (Windows tasks don't start it when nobody is logged on)."""
+    if LOCAL:
+        return spawn_comfy_local()
     subprocess.Popen(SSH + [HOST, COMFY_START_CMD], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      stdin=subprocess.DEVNULL, start_new_session=True)
 
@@ -58,7 +110,7 @@ def spawn_comfy():
 def imagine_jobs():
     """Imagine's public job counts, or None when it is not reachable."""
     try:
-        with urllib.request.urlopen(IMAGINE_URL + "/api/jobs", timeout=3) as r:
+        with urllib.request.urlopen(IMAGINE_URL + "/api/jobs", timeout=2 if LOCAL else 3) as r:
             js = json.load(r).get("jobs") or []
     except Exception:
         return None
@@ -387,7 +439,7 @@ def main():
     load_token()
     load_log()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
-    print(f"predator-control on 127.0.0.1:{PORT}", flush=True)
+    print(f"predator-control on 127.0.0.1:{PORT} ({'LOCAL mode, commands run on this machine' if LOCAL else 'ssh to ' + HOST})", flush=True)
     srv.serve_forever()
 
 

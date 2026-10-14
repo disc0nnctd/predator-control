@@ -16,6 +16,10 @@ sudo tailscale serve --bg --https=8793 http://127.0.0.1:8793
 Open the page, paste the token (kept in the tab's sessionStorage only). 10 wrong tokens in 5 minutes lock the API for 5 minutes.
 New token: delete the token file and restart the service.
 
+## Serving it from Predator itself
+
+`deploy/predator/` is a ready bundle (LOCAL mode: same app, commands run on Predator, works while dcmini is down). See `deploy/predator/SETUP.md`.
+
 ## How it works
 
 - Status: `mode.ps1 -Status` (read-only) + ComfyUI queue + the model catalog (`llama_models.json`) over ssh, Imagine's `/api/jobs` counts. Cached 2.5 s.

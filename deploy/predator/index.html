@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Predator control</title>
+<style>
+:root{--bg:#10141a;--card:#1a212b;--ink:#e8edf3;--mute:#93a1b3;--ok:#3ec27a;--warn:#e8b339;--bad:#ef5b5b;--acc:#4f9dff;--line:#2a3442}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--ink);padding:12px;max-width:760px;margin:auto}
+h1{font-size:1.2rem;margin:.2rem 0 .6rem}
+h2{font-size:1rem;margin:1.2rem 0 .4rem;color:var(--mute);font-weight:600}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:8px 0}
+.card h3{margin:0 0 4px;font-size:1.05rem}
+.card p{margin:.2rem 0 .6rem;color:var(--mute);font-size:.92rem}
+.card.now{border-color:var(--acc)}
+.big{font-size:1.5rem;font-weight:700}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:.93rem;margin-top:8px}
+.kv b{color:var(--mute);font-weight:500}
+button,select{font:inherit;border-radius:8px;border:1px solid var(--line);background:#243040;color:var(--ink);padding:10px 14px;min-height:44px}
+button{cursor:pointer;background:var(--acc);border-color:var(--acc);color:#04101f;font-weight:600}
+button.sec{background:#243040;color:var(--ink);border-color:var(--line)}
+button.danger{background:var(--bad);border-color:var(--bad);color:#200}
+button:disabled{opacity:.45;cursor:not-allowed}
+input[type=password],input[type=text]{font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:#0c1117;color:var(--ink);width:100%;min-height:44px}
+.bar{height:10px;background:#0c1117;border-radius:5px;overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;background:var(--ok)}
+.pill{display:inline-block;padding:2px 10px;border-radius:99px;font-size:.8rem;background:#243040}
+.pill.ok{background:#1d4d33;color:#9df0c1}.pill.warn{background:#5a4510;color:#ffe08a}.pill.bad{background:#5a1d1d;color:#ffb3b3}
+#busy{display:none;background:#5a4510;color:#ffe08a;border-radius:10px;padding:10px;margin:8px 0}
+#busy.on{display:block}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes s{to{transform:rotate(360deg)}}
+#msg{min-height:1.3em;color:var(--warn);margin:6px 0}
+.ovr{display:none;border:1px dashed var(--bad);border-radius:10px;padding:8px;margin:8px 0}
+.ovr.on{display:block}
+dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:12px;max-width:420px;width:92%}
+dialog::backdrop{background:#000a}
+table{width:100%;border-collapse:collapse;font-size:.85rem}td{padding:3px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+.hide{display:none}
+</style></head><body>
+<h1>Predator control</h1>
+
+<div id="login" class="card hide">
+  <h3>Access token</h3>
+  <p>Paste the token from <code>~/.local/share/predator-control/token</code> (also printed once in the service log).</p>
+  <div class="row"><input type="password" id="tok" autocomplete="off" placeholder="token" style="flex:1"><button id="tokgo">Open</button></div>
+  <div id="tokerr" style="color:var(--bad);margin-top:6px"></div>
+</div>
+
+<div id="app" class="hide">
+  <div class="card now" id="now">
+    <div class="row"><span class="big" id="mode">...</span><span id="pill"></span></div>
+    <div id="sub" style="color:var(--mute)"></div>
+    <div class="bar" title="GPU memory"><i id="gbar" style="width:0"></i></div>
+    <div class="kv" id="kv"></div>
+  </div>
+  <div id="busy"><span class="spin"></span><span id="busytxt"></span></div>
+  <div id="msg"></div>
+  <div class="ovr" id="ovr"><label><input type="checkbox" id="override"> <b>I know a job is running</b> (stop or switch anyway; the job will be lost)</label></div>
+
+  <h2>Switch what owns the GPU</h2>
+  <div class="card" data-mode="image"><h3>Image</h3><p>Frees the GPU for the picture engine (ComfyUI). Stops any language model. ComfyUI itself is started below.</p><button data-sw="image">Switch to Image</button></div>
+  <div class="card" data-mode="llm"><h3>Language model</h3><p>Loads one model into the GPU and stops ComfyUI. Loading can take a few minutes. Also closes browsers and chat apps on Predator to free memory.</p>
+    <div class="row"><select id="model" style="flex:1"></select><button data-sw="llm">Switch to this model</button></div></div>
+  <div class="card" data-mode="gaming"><h3>Gaming</h3><p>No models; Predator gets its gaming profile. Stops ComfyUI and any model.</p><button data-sw="gaming">Switch to Gaming</button></div>
+  <div class="card" data-mode="idle"><h3>Idle</h3><p>Stops every model; nothing owns the GPU.</p><button data-sw="idle">Switch to Idle</button></div>
+
+  <h2>Single tools</h2>
+  <div class="card"><h3>ComfyUI (picture engine)</h3><p id="comfyinfo"></p>
+    <div class="row"><button class="sec" data-act="comfy_start">Start</button><button class="sec" data-act="comfy_stop">Stop</button><button class="sec" data-act="comfy_restart">Restart</button></div></div>
+  <div class="card"><h3>Language model server</h3><p id="llminfo"></p>
+    <button class="sec" data-act="llama_stop">Stop llama-server</button></div>
+
+  <h2>Recent actions</h2>
+  <div class="card"><table id="log"></table></div>
+  <p style="color:var(--mute);font-size:.8rem">Counts and times only; no prompts or text are ever stored here. <a href="#" id="logout" style="color:var(--mute)">Forget token</a></p>
+</div>
+
+<dialog id="dlg"><form method="dialog"><p id="dtxt"></p><div class="row" style="justify-content:flex-end"><button class="sec" value="no">Cancel</button><button value="yes" id="dyes">Yes, do it</button></div></form></dialog>
+
+<script>
+const $=id=>document.getElementById(id);
+let S=null, TOKEN=sessionStorage.getItem('pc_token')||'';
+const MODE_NAME={image:'Image (ComfyUI)',llm:'Language model',gaming:'Gaming',idle:'Idle',conflict:'Conflict: image engine and model both running',unreachable:'Unreachable',unknown:'Unknown'};
+
+async function api(path,body){
+  const r=await fetch(path,{method:body?'POST':'GET',headers:{'X-Token':TOKEN,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  let j={};try{j=await r.json()}catch(e){}
+  if(r.status===401||r.status===429){showLogin(j.error||'Wrong token.')}
+  return {status:r.status,j};
+}
+function showLogin(err){sessionStorage.removeItem('pc_token');TOKEN='';$('app').classList.add('hide');$('login').classList.remove('hide');$('tokerr').textContent=err||''}
+$('tokgo').onclick=async()=>{TOKEN=$('tok').value.trim();const r=await api('/api/status');if(r.status===200){sessionStorage.setItem('pc_token',TOKEN);$('tok').value='';start()}};
+$('tok').onkeydown=e=>{if(e.key==='Enter')$('tokgo').click()};
+$('logout').onclick=e=>{e.preventDefault();showLogin('')};
+
+function kv(rows){const k=$('kv');k.replaceChildren();for(const [a,b] of rows){const x=document.createElement('b');x.textContent=a;const y=document.createElement('span');y.textContent=b;k.append(x,y)}}
+
+function render(s){
+  S=s;
+  const mode=s.mode;
+  $('mode').textContent=MODE_NAME[mode]||mode;
+  const m=$('pill');
+  m.className='pill '+(!s.reachable?'bad':s.busy.busy?'warn':'ok');
+  m.textContent=!s.reachable?'cannot reach Predator':s.busy.busy?'work in progress':'free';
+  let sub='';
+  if(s.reachable&&mode==='llm'&&s.llama_running.length)sub=(s.model_name||s.set_model||'')+' ('+s.llama_running.join(', ')+')';
+  if(s.reachable&&s.pending)sub+=(sub?' · ':'')+'a switch is pending';
+  $('sub').textContent=sub;
+  const g=s.gpu||{};
+  $('gbar').style.width=(g.total_mb?Math.round(100*g.used_mb/g.total_mb):0)+'%';
+  const rows=[];
+  if(s.reachable){
+    rows.push(['GPU memory',g.total_mb?`${g.used_mb} / ${g.total_mb} MB`:'?']);
+    rows.push(['GPU use',(g.util_pct!=null?g.util_pct+'%':'?')+(g.temp_c!=null?'  ·  '+g.temp_c+' °C':'')]);
+    rows.push(['ComfyUI',s.comfy_running?('running'+(s.comfy_queue!=null?', queue '+s.comfy_queue:'')):'not running']);
+    rows.push(['Language model',s.llama_running.length?s.llama_running.join(', '):'none running']);
+    rows.push(['Imagine jobs',s.imagine?`${s.imagine.running} running, ${s.imagine.pending} waiting`:'not reachable']);
+    rows.push(['Last switch to',(s.set_mode||'?')+(s.set_model?' '+s.set_model:'')+(s.set_at?' at '+s.set_at:'')]);
+    rows.push(['Power plan',s.power_plan||'?']);
+    rows.push(['Updated',s.time]);
+  } else rows.push(['Note','Predator may be asleep, off or off the tailnet.']);
+  kv(rows);
+  // model list
+  const sel=$('model'),cur=sel.value;
+  if(s.models.length&&sel.options.length!==s.models.length){sel.replaceChildren();for(const x of s.models){const o=document.createElement('option');o.value=x.key;o.textContent=x.name+(x.vram_mb?` (~${(x.vram_mb/1000).toFixed(1)} GB)`:'')+' ['+x.key+']';sel.append(o)}if(cur)sel.value=cur}
+  // busy indicator
+  const a=s.action||{};
+  $('busy').classList.toggle('on',!!a.running);
+  $('busytxt').textContent=a.running?`${a.name}: ${a.stage}`:'';
+  if(!a.running&&a.ok===false&&a.error)$('msg').textContent='Last action failed: '+a.error;
+  else if(!a.running&&a.ok===true&&$('msg').dataset.k!=='ref')$('msg').textContent='';
+  $('ovr').classList.toggle('on',!!s.busy.busy||$('ovr').dataset.force==='1');
+  if(s.busy.busy)$('msg').textContent=s.busy.reasons.join('; ')+'.';
+  // card highlighting + enabling
+  document.querySelectorAll('[data-mode]').forEach(c=>c.style.borderColor=(c.dataset.mode===mode)?'var(--acc)':'');
+  const off=!s.reachable||a.running;
+  document.querySelectorAll('button[data-sw],button[data-act]').forEach(b=>b.disabled=off);
+  $('comfyinfo').textContent=s.reachable?(s.comfy_running?'Running'+(s.comfy_queue?`, ${s.comfy_queue} job(s) in its queue.`:', queue empty.'):'Not running. Start only works from image or idle mode.'):'';
+  $('llminfo').textContent=s.reachable?(s.llama_running.length?'Running: '+s.llama_running.join(', '):'None running.'):'';
+}
+
+async function pollLog(){const r=await api('/api/log');if(r.status!==200)return;const t=$('log');t.replaceChildren();for(const e of r.j.log.slice().reverse().slice(0,15)){const tr=t.insertRow();[e.t.slice(5),e.action+(e.detail?' '+e.detail:'')+(e.override?' (override)':''),e.result].forEach(v=>{tr.insertCell().textContent=v})}}
+
+let timer=null,n=0;
+async function tick(){
+  const r=await api('/api/status');
+  if(r.status===200){render(r.j);if(n++%3===0)pollLog()}
+}
+function start(){$('login').classList.add('hide');$('app').classList.remove('hide');tick();clearInterval(timer);timer=setInterval(tick,3000)}
+
+function ask(text){return new Promise(res=>{$('dtxt').textContent=text;const d=$('dlg');d.onclose=()=>res(d.returnValue==='yes');d.showModal()})}
+
+async function send(body,text){
+  if(!await ask(text))return;
+  body.confirm=true;body.override=$('override').checked;
+  const r=await api('/api/action',body);
+  if(r.status===202){$('msg').textContent='Started.';$('override').checked=false;tick();pollLog()}
+  else{$('msg').textContent=r.j.error||'Refused.';if(r.j.can_override){$('ovr').dataset.force='1';$('ovr').classList.add('on')}}
+}
+document.addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  if(b.dataset.sw){
+    const mode=b.dataset.sw;let model=null,t;
+    if(mode==='llm'){model=$('model').value;t=`Switch Predator to the language model "${model}"? ComfyUI will be stopped and the model loaded (a few minutes). Browsers and chat apps on Predator are closed.`}
+    else if(mode==='image')t='Switch Predator to Image mode? Any language model is stopped.';
+    else if(mode==='gaming')t='Switch Predator to Gaming mode? ComfyUI and any model are stopped; browsers and chat apps may be closed.';
+    else t='Switch Predator to Idle? ComfyUI and any model are stopped.';
+    send({action:'switch',mode,model},t);
+  }else if(b.dataset.act){
+    const t={comfy_start:'Start ComfyUI on Predator?',comfy_stop:'Stop ComfyUI? Pictures being made are lost.',comfy_restart:'Restart ComfyUI? Pictures being made are lost.',llama_stop:'Stop the running language model server?'}[b.dataset.act];
+    send({action:b.dataset.act},t);
+  }
+});
+if(TOKEN)api('/api/status').then(r=>{if(r.status===200)start();else showLogin('')});else showLogin('');
+</script></body></html>
