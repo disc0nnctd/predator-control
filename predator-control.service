@@ -1,0 +1,17 @@
+[Unit]
+Description=Predator control (private GPU model switcher)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/predator-control/server.py
+Restart=on-failure
+RestartSec=5
+# data (token + action log, no prompts) lives only in ~/.local/share/predator-control
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+# keep a detached `ssh` that holds ComfyUI on Predator alive across a restart of this service
+KillMode=process
+
+[Install]
+WantedBy=default.target
