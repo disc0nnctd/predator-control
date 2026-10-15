@@ -117,7 +117,6 @@ function render(s){
     rows.push(['GPU use',(g.util_pct!=null?g.util_pct+'%':'?')+(g.temp_c!=null?'  ·  '+g.temp_c+' °C':'')]);
     rows.push(['ComfyUI',s.comfy_running?('running'+(s.comfy_queue!=null?', queue '+s.comfy_queue:'')):'not running']);
     rows.push(['Language model',s.llama_running.length?s.llama_running.join(', '):'none running']);
-    rows.push(['Imagine jobs',s.imagine?`${s.imagine.running} running, ${s.imagine.pending} waiting`:'not reachable']);
     rows.push(['Last switch to',(s.set_mode||'?')+(s.set_model?' '+s.set_model:'')+(s.set_at?' at '+s.set_at:'')]);
     rows.push(['Power plan',s.power_plan||'?']);
     rows.push(['Updated',s.time]);
