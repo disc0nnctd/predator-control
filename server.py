@@ -418,6 +418,23 @@ class H(BaseHTTPRequestHandler):
             self.send(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path == "/api/password":  # the owner picks their own password (replaces the token; the file stays 600)
+            if not self.auth():
+                return None
+            try:
+                body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 4096)) or b"{}")
+                new = str(body.get("password", "")).strip()
+            except Exception:
+                return self.send(400, {"error": "Bad request."})
+            if len(new) < 8 or len(new) > 200:
+                return self.send(400, {"error": "Use 8 to 200 characters."})
+            global TOKEN
+            fd = os.open(DATA / "token", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(new + "\n")
+            TOKEN = new
+            log("password", "", "changed")
+            return self.send(200, {"ok": True})
         if self.path != "/api/action" or not self.auth():
             return None if self.path == "/api/action" else self.send(404, {"error": "not found"})
         try:

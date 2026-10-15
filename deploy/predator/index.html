@@ -42,7 +42,7 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}td{padding:3px 6px;bo
 
 <div id="login" class="card hide">
   <h3>Access token</h3>
-  <p>Paste the token from <code>~/.local/share/predator-control/token</code> (also printed once in the service log).</p>
+  <p>Your password. First time: the token in <code>~/.local/share/predator-control/token</code>; you can then pick your own with “Change password”.</p>
   <div class="row"><input type="password" id="tok" autocomplete="off" placeholder="token" style="flex:1"><button id="tokgo">Open</button></div>
   <div id="tokerr" style="color:var(--bad);margin-top:6px"></div>
 </div>
@@ -73,7 +73,7 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}td{padding:3px 6px;bo
 
   <h2>Recent actions</h2>
   <div class="card"><table id="log"></table></div>
-  <p style="color:var(--mute);font-size:.8rem">Counts and times only; no prompts or text are ever stored here. <a href="#" id="logout" style="color:var(--mute)">Forget token</a></p>
+  <p style="color:var(--mute);font-size:.8rem">Counts and times only; no prompts or text are ever stored here. <a href="#" id="chpw" style="color:var(--mute)">Change password</a> · <a href="#" id="logout" style="color:var(--mute)">Forget token</a></p>
 </div>
 
 <dialog id="dlg"><form method="dialog"><p id="dtxt"></p><div class="row" style="justify-content:flex-end"><button class="sec" value="no">Cancel</button><button value="yes" id="dyes">Yes, do it</button></div></form></dialog>
@@ -92,6 +92,8 @@ async function api(path,body){
 function showLogin(err){sessionStorage.removeItem('pc_token');TOKEN='';$('app').classList.add('hide');$('login').classList.remove('hide');$('tokerr').textContent=err||''}
 $('tokgo').onclick=async()=>{TOKEN=$('tok').value.trim();const r=await api('/api/status');if(r.status===200){sessionStorage.setItem('pc_token',TOKEN);$('tok').value='';start()}};
 $('tok').onkeydown=e=>{if(e.key==='Enter')$('tokgo').click()};
+$('chpw').onclick=async e=>{e.preventDefault();const a=prompt('New password (8 or more characters):');if(!a)return;if(a!==prompt('Type it again:')){alert('They did not match.');return}
+  const r=await api('/api/password',{password:a});if(r.status===200){TOKEN=a;sessionStorage.setItem('pc_token',a);alert('Password changed.')}else{alert(r.j.error||'Failed.')}};
 $('logout').onclick=e=>{e.preventDefault();showLogin('')};
 
 function kv(rows){const k=$('kv');k.replaceChildren();for(const [a,b] of rows){const x=document.createElement('b');x.textContent=a;const y=document.createElement('span');y.textContent=b;k.append(x,y)}}
