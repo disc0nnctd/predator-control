@@ -46,6 +46,13 @@ New token: delete the token file and restart the service.
 - The copy running ON Predator (LOCAL mode, non-admin task) can list/download/delete files but cannot write the catalog: use
   the dcmini page for catalog changes.
 
+## GPU processes
+
+"What is using the GPU" lists every process holding GPU memory or using the GPU (Windows GPU counters; nvidia-smi shows N/A
+under WDDM), biggest first, with Terminate. Windows-critical processes (dwm, csrss, svchost...) are never offered. A kill
+re-checks pid AND name in a fresh list; ending ComfyUI with jobs queued needs the override tick. The non-admin copy on
+Predator can only end processes of its own user.
+
 ## Tests
 
 `python3 ~/predator-control/tests/check.py` uses a fake Predator (never touches the real one). `--live` adds one read-only real status read.

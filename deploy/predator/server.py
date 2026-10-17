@@ -743,6 +743,83 @@ if (Test-Path -LiteralPath $p) {{ 'LEFT' }} else {{ 'CANCELLED' }}"""), timeout=
     return {"ok": True, "note": "Cancelled and the partial file deleted."}
 
 
+# ---- GPU processes --------------------------------------------------------------------------------------------------
+# nvidia-smi on WDDM reports N/A per-process memory, so Windows' own GPU counters are used (dedicated memory + engine %).
+GPU_PS = r"""$ProgressPreference='SilentlyContinue'
+$m=@{}; (Get-Counter '\GPU Process Memory(*)\Dedicated Usage' -ErrorAction SilentlyContinue).CounterSamples | ForEach-Object { if ($_.InstanceName -match 'pid_(\d+)_') { $m[[int]$Matches[1]] += $_.CookedValue } }
+$u=@{}; (Get-Counter '\GPU Engine(*)\Utilization Percentage' -ErrorAction SilentlyContinue).CounterSamples | ForEach-Object { if ($_.InstanceName -match 'pid_(\d+)_') { $u[[int]$Matches[1]] += $_.CookedValue } }
+@($m.Keys | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter "ProcessId=$_"; if ($p) {
+  [pscustomobject]@{pid=[int]$_; name="$($p.Name)"; mb=[math]::Round($m[$_]/1MB); util=[math]::Round([double]$u[$_]); cmd="$($p.CommandLine)"} } }) | ConvertTo-Json -Compress"""
+# never offered for termination: killing these crashes or logs out Windows
+PROTECTED = {"system", "csrss.exe", "dwm.exe", "winlogon.exe", "wininit.exe", "services.exe", "lsass.exe", "smss.exe",
+             "svchost.exe", "fontdrvhost.exe", "registry", "memory compression"}
+
+
+def gpu_kind(name, cmd):
+    n = name.lower()
+    if n in PROTECTED:
+        return "system"
+    if n == "python.exe" and "main.py --listen" in cmd:
+        return "comfyui"
+    if n in ("llama-server.exe", "llama-bench.exe", "ollama.exe", "ollama app.exe"):
+        return "model"
+    return "app"
+
+
+def gpu_procs():
+    """Processes holding GPU memory or using the GPU, biggest first, or None when Predator cannot be reached."""
+    try:
+        d = jload(remote(ps(GPU_PS), timeout=60))
+    except Exception:
+        return None
+    out = []
+    for p in as_list(d):
+        try:
+            pid, mb, util = int(p.get("pid")), int(p.get("mb") or 0), int(p.get("util") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 4 or (mb < 1 and util < 1):
+            continue
+        name, cmd = str(p.get("name", ""))[:80], str(p.get("cmd", ""))
+        out.append({"pid": pid, "name": name, "mem_mb": mb, "util_pct": util, "cmd": cmd[:240], "kind": gpu_kind(name, cmd)})
+    return sorted(out, key=lambda x: (-x["mem_mb"], -x["util_pct"]))
+
+
+def kill_proc(body):
+    """Terminate one GPU process. It must be in a fresh GPU list with the same pid AND name (no stale-pid kills)."""
+    if body.get("confirm") is not True:
+        raise Refuse("This needs an explicit confirmation.", 400)
+    pid, name = body.get("pid"), body.get("name")
+    if not isinstance(pid, int) or not isinstance(name, str):
+        raise Refuse("Bad request.", 400)
+    with lock:
+        if action["running"]:
+            raise Refuse(f"Another action is still running ({action['name']}: {action['stage']}).")
+        procs = gpu_procs()
+        if procs is None:
+            raise Refuse("Predator cannot be reached.", 503)
+        p = next((p for p in procs if p["pid"] == pid and p["name"] == name), None)
+        if p is None:
+            raise Refuse("That process is no longer using the GPU (or its id changed); refresh the list.", 409)
+        if p["kind"] == "system":
+            raise Refuse(f"{name} is part of Windows; ending it would crash or log out Predator.", 403)
+        if p["kind"] == "comfyui" and body.get("override") is not True:
+            st = status(fresh=True)
+            if st["busy"]["busy"]:
+                raise Refuse("A picture job is running or waiting: " + "; ".join(st["busy"]["reasons"])
+                             + ". Tick 'I know a job is running' to end it anyway.", 409)
+        out = remote(ps(f"""try {{ Stop-Process -Id {pid} -Force -ErrorAction Stop; Start-Sleep -Seconds 1
+if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ 'STILL' }} else {{ 'KILLED' }} }} catch {{ 'ERR ' + $_.Exception.Message }}"""),
+                     timeout=40)
+        cache["t"] = 0.0
+        if "KILLED" not in (out or ""):
+            log("kill", f"{name} {pid}", "FAILED")
+            raise Refuse(f"Could not end {name}: " + (out or "no answer").strip()[-150:], 502)
+        log("kill", f"{name} {pid}", "ok", body.get("override") is True)
+        note = " If it was a model, the mode will show idle; HermesMode does not restart it." if p["kind"] == "model" else ""
+        return {"ok": True, "note": f"Ended {name} (pid {pid}, was using {p['mem_mb']} MB).{note}"}
+
+
 def model_log(key):
     """Last 80 lines of one catalog model's llama-server log (path from the catalog, pattern-checked)."""
     cat = catalog_full() or {"models": []}
@@ -816,6 +893,8 @@ class H(BaseHTTPRequestHandler):
         q = dict(x.split("=", 1) for x in self.path.partition("?")[2].split("&") if "=" in x)
         if p == "/api/models" and self.auth():
             return self.send(200, model_view(fresh=q.get("fresh") == "1"))
+        if p == "/api/gpu_procs" and self.auth():
+            return self.send(200, {"procs": gpu_procs()})
         if p == "/api/downloads" and self.auth():
             return self.send(200, {"downloads": download_status()})
         if p == "/api/model_log" and self.auth():
@@ -844,7 +923,7 @@ class H(BaseHTTPRequestHandler):
             TOKEN = new
             log("password", "", "changed")
             return self.send(200, {"ok": True})
-        if self.path == "/api/models":
+        if self.path in ("/api/models", "/api/kill"):
             if not self.auth():
                 return None
             try:
@@ -854,7 +933,7 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 return self.send(400, {"error": "Bad request."})
             try:
-                return self.send(200, model_op(body))
+                return self.send(200, model_op(body) if self.path == "/api/models" else kill_proc(body))
             except Refuse as e:
                 return self.send(e.code, {"error": e.msg})
             except Exception as e:

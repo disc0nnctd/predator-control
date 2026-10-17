@@ -21,6 +21,9 @@ CAT = {"defaultModel": "a3b", "models": [
 FILES = {U + "big.gguf": 20e9, U + "nine.gguf": 5e9, U + "spare.gguf": 4e9, r"D:\models\x\mmproj-f16.gguf": 9e8,
          U + "odd&name.gguf": 1e9, EXE: 9216, U + r"turboquant-cuda\build\bin\llama-server.exe": 4e6}
 UPLOADED = []
+GPU = {1580: {"name": "dwm.exe", "mb": 600, "util": 0, "cmd": "dwm.exe"},
+       19420: {"name": "python.exe", "mb": 5300, "util": 94, "cmd": "python.exe main.py --listen 127.0.0.1 --port 8188"},
+       10768: {"name": "stremio.exe", "mb": 246, "util": 5, "cmd": "stremio"}, 4972: {"name": "idle.exe", "mb": 0, "util": 0, "cmd": ""}}
 JOBS = []
 
 
@@ -28,7 +31,7 @@ class Fake:
     """Predator stand-in: understands only the fixed commands server.py sends; records everything."""
     def __init__(s):
         s.mode, s.model, s.comfy, s.llm, s.queue, s.pending, s.up = "image", None, True, [], 0, False, True
-        s.calls, s.spawned, s.scripts, s.curl = [], 0, [], []
+        s.calls, s.spawned, s.scripts, s.curl, s.killed = [], 0, [], [], []
 
     def __call__(s, cmd, timeout=25):
         s.calls.append(cmd)
@@ -80,6 +83,10 @@ class Fake:
             p = sc.split("$p='")[1].split("'")[0]; FILES.pop(p, None); s.curl = [c for c in s.curl if p not in c]; return "CANCELLED"
         if "DELETED" in sc:
             FILES.pop(sc.split("-LiteralPath '")[1].split("'")[0]); return "DELETED"
+        if "GPU Process Memory" in sc:
+            return json.dumps([{"pid": p, **v} for p, v in GPU.items()])
+        if "Stop-Process -Id" in sc and "KILLED" in sc:
+            pid = int(sc.split("Stop-Process -Id ")[1].split()[0]); GPU.pop(pid, None); s.killed.append(pid); return "KILLED"
         if "Get-Content -LiteralPath" in sc:
             return "line1\nline2"
         raise AssertionError("unexpected script: " + sc[:200])
@@ -285,6 +292,21 @@ c, j = mop(op="cancel_download", part=part); check(c == 200 and part not in FILE
 S.hf_total = lambda url: 80e9
 check(mop(op="download", url="https://huggingface.co/u/r/resolve/main/huge.gguf")[0] == 409, "download refused when D: is too small")
 check(all("calc" not in sc for sc in fake.scripts) and all("calc" not in x for x in fake.calls), "no free text reached Predator")
+
+# ---- GPU processes ----
+c, g = call("/api/gpu_procs")
+check(c == 200 and [p["pid"] for p in g["procs"]] == [19420, 1580, 10768], "gpu list: biggest first, idle processes hidden")
+check({p["pid"]: p["kind"] for p in g["procs"]} == {19420: "comfyui", 1580: "system", 10768: "app"}, "gpu list: kinds")
+kill = lambda **b: call("/api/kill", {"confirm": True, **b})
+check(kill(pid=10768, name="stremio.exe", confirm=False)[0] == 400, "kill needs confirm")
+check(kill(pid=1580, name="dwm.exe")[0] == 403, "Windows process cannot be ended")
+check(kill(pid=10768, name="other.exe")[0] == 409, "pid with a different name refused (stale pid)")
+check(kill(pid="10768; calc", name="stremio.exe")[0] == 400, "non-integer pid refused")
+fake.comfy, fake.queue = True, 3; S.cache["t"] = 0
+check(kill(pid=19420, name="python.exe")[0] == 409, "ComfyUI with queued jobs needs the override")
+c, j = kill(pid=10768, name="stremio.exe"); check(c == 200 and fake.killed == [10768], "app terminated")
+c, j = kill(pid=19420, name="python.exe", override=True); check(c == 200 and 19420 in fake.killed, "ComfyUI ended with override")
+fake.comfy, fake.queue = False, 0; S.cache["t"] = 0
 
 # ---- LOCAL mode (server runs ON Predator): commands run directly; Windows-path logic under a fake ----
 import subprocess, importlib

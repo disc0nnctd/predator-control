@@ -85,6 +85,10 @@ pre{white-space:pre-wrap;word-break:break-all;font-size:.75rem;max-height:60vh;o
     <div class="row" style="margin-top:8px"><button id="dlgo">Download</button></div>
     <div id="dllist" style="margin-top:8px"></div></div>
 
+  <h2>What is using the GPU</h2>
+  <div class="card"><div class="row" style="justify-content:space-between"><p id="gpinfo" style="margin:0">Not loaded yet.</p>
+    <button class="sec" id="gprefresh">Refresh</button></div><div id="gplist"></div></div>
+
   <h2>Single tools</h2>
   <div class="card"><h3>ComfyUI (picture engine)</h3><p id="comfyinfo"></p>
     <div class="row"><button class="sec" data-act="comfy_start">Start</button><button class="sec" data-act="comfy_stop">Stop</button><button class="sec" data-act="comfy_restart">Restart</button></div></div>
@@ -185,7 +189,7 @@ async function tick(){
   const r=await api('/api/status');
   if(r.status===200){render(r.j);if(n++%3===0)pollLog()}
 }
-function start(){$('login').classList.add('hide');$('app').classList.remove('hide');tick();clearInterval(timer);timer=setInterval(tick,3000);loadModels(false)}
+function start(){$('login').classList.add('hide');$('app').classList.remove('hide');tick();clearInterval(timer);timer=setInterval(tick,3000);loadModels(false);loadGpu()}
 
 function ask(text){return new Promise(res=>{$('dtxt').textContent=text;const d=$('dlg');d.onclose=()=>res(d.returnValue==='yes');d.showModal()})}
 
@@ -322,5 +326,33 @@ $('dlgo').onclick=async()=>{const url=$('dlurl').value.trim();if(!url)return;
 $('madd').onclick=()=>M&&openEdit(null,null);
 $('mrefresh').onclick=()=>loadModels(true);
 let lastScan=0;
+
+// ---- GPU processes ----
+const KIND={comfyui:'ComfyUI',model:'language model',app:'app',system:'Windows'};
+async function loadGpu(){
+  $('gpinfo').textContent='Reading Predator (about 5 s)…';
+  const r=await api('/api/gpu_procs');const L=$('gplist');L.replaceChildren();
+  const list=r.status===200?r.j.procs:null;
+  if(!list){$('gpinfo').textContent='Could not read Predator.';return}
+  $('gpinfo').textContent=`${list.length} process(es) · ${list.reduce((a,p)=>a+p.mem_mb,0)} MB GPU memory · read ${new Date().toLocaleTimeString()}`;
+  for(const p of list){
+    const d=el('div',null,'mrow');const t=el('div',`${p.name}  `,'t');
+    t.append(el('span',KIND[p.kind]||p.kind,'pill'+(p.kind==='system'?'':p.mem_mb>500?' warn':'')));
+    d.append(t,el('div',`pid ${p.pid} · ${p.mem_mb} MB · ${p.util_pct}% GPU`,'d'));
+    if(p.cmd)d.append(el('div',p.cmd.length>160?p.cmd.slice(0,160)+'…':p.cmd,'d'));
+    if(p.kind!=='system'){const row=el('div',null,'row');row.style.marginTop='6px';
+      row.append(btn('Terminate',()=>killProc(p),'danger'));d.append(row)}
+    L.append(d);
+  }
+}
+async function killProc(p){
+  if(!await ask(`End ${p.name} (pid ${p.pid}, ${p.mem_mb} MB) on Predator? Unsaved work in it is lost.`))return;
+  $('msg').textContent='Ending…';
+  const r=await api('/api/kill',{pid:p.pid,name:p.name,confirm:true,override:$('override').checked});
+  $('msg').textContent=r.status===200?r.j.note:(r.j.error||'Refused.');
+  if(r.status===409&&/Tick/.test(r.j.error||'')){$('ovr').dataset.force='1';$('ovr').classList.add('on')}
+  $('override').checked=false;tick();loadGpu();
+}
+$('gprefresh').onclick=loadGpu;
 if(TOKEN)api('/api/status').then(r=>{if(r.status===200)start();else showLogin('')});else showLogin('');
 </script></body></html>
