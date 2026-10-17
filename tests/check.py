@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """predator-control tests. ssh is STUBBED (a fake Predator in memory): nothing here switches or touches the real machine.
 `python3 tests/check.py --live` additionally does ONE read-only real status read (mode.ps1 -Status + the catalog file)."""
-import importlib.util, json, os, sys, tempfile, threading, time, urllib.request, urllib.error
+import base64, importlib.util, json, os, sys, tempfile, threading, time, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -11,7 +11,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server as S
 
 S.POLL_SECONDS = 0.02
-CAT = {"models": [{"key": "a3b", "name": "Big", "requiredVramMB": 3200}, {"key": "9b", "name": "Nine", "requiredVramMB": 5800}]}
+U = "C:\\Users\\dcmini\\"
+EXE = U + r"llama-b10453\llama-server.exe"
+CAT = {"defaultModel": "a3b", "models": [
+    {"key": "a3b", "name": "Big", "requiredVramMB": 3200, "path": U + "big.gguf", "port": 8085, "alias": "big", "args": "-ngl 99 --cpu-moe",
+     "log": U + "llama-server-a3b.log", "serverExe": EXE, "notes": "keep"},
+    {"key": "9b", "name": "Nine", "requiredVramMB": 5800, "path": U + "nine.gguf", "port": 8080, "alias": "nine", "args": "-ngl 99",
+     "log": U + "llama-server.log"}]}
+FILES = {U + "big.gguf": 20e9, U + "nine.gguf": 5e9, U + "spare.gguf": 4e9, r"D:\models\x\mmproj-f16.gguf": 9e8,
+         U + "odd&name.gguf": 1e9, EXE: 9216, U + r"turboquant-cuda\build\bin\llama-server.exe": 4e6}
+UPLOADED = []
 JOBS = []
 
 
@@ -19,7 +28,7 @@ class Fake:
     """Predator stand-in: understands only the fixed commands server.py sends; records everything."""
     def __init__(s):
         s.mode, s.model, s.comfy, s.llm, s.queue, s.pending, s.up = "image", None, True, [], 0, False, True
-        s.calls, s.spawned = [], 0
+        s.calls, s.spawned, s.scripts, s.curl = [], 0, [], []
 
     def __call__(s, cmd, timeout=25):
         s.calls.append(cmd)
@@ -51,7 +60,29 @@ class Fake:
                 s.llm = []
                 s.comfy = s.comfy and req == "image"
             return ""
+        if "-EncodedCommand" in cmd:
+            return s.ps(base64.b64decode(cmd.split("-EncodedCommand ")[1]).decode("utf-16-le"))
         raise AssertionError("unexpected command: " + cmd)
+
+    def ps(s, sc):
+        s.scripts.append(sc)
+        if "Get-PSDrive" in sc:
+            return json.dumps({"files": [{"p": p, "s": n, "t": "2026-10-17 10:00"} for p, n in FILES.items()],
+                               "disks": [{"n": "C", "free": 20e9}, {"n": "D", "free": 50e9}]})
+        if "WriteAllText" in sc:
+            CAT.clear(); CAT.update(json.loads(UPLOADED[-1])); return "WROTE"
+        if "Win32_Process -MethodName Create" in sc:
+            s.curl.append(sc.split("CommandLine='")[1].split("'}")[0]); part = s.curl[-1].split('-o "')[1].split('"')[0]
+            FILES[part] = 1000; return "STARTED 0"
+        if "Name='curl.exe'" in sc and "parts=" in sc:
+            return json.dumps({"parts": [{"p": p, "s": n} for p, n in FILES.items() if p.endswith(".part")], "curl": s.curl})
+        if "CANCELLED" in sc:
+            p = sc.split("$p='")[1].split("'")[0]; FILES.pop(p, None); s.curl = [c for c in s.curl if p not in c]; return "CANCELLED"
+        if "DELETED" in sc:
+            FILES.pop(sc.split("-LiteralPath '")[1].split("'")[0]); return "DELETED"
+        if "Get-Content -LiteralPath" in sc:
+            return "line1\nline2"
+        raise AssertionError("unexpected script: " + sc[:200])
 
 
 fake = Fake()
@@ -189,6 +220,71 @@ lf = Path(tmp) / "data/actions.log"
 lines = [json.loads(x) for x in lf.read_text().splitlines()]
 check(len(lines) >= 8 and all(set(e) == {"t", "action", "detail", "result", "override"} for e in lines), "log file has only time/action/detail/result")
 check(call("/api/log")[1]["log"], "log endpoint works")
+
+# ---- model management ----
+S.put_text = lambda text, path: UPLOADED.append(text)
+S.hf_total = lambda url: 3e9
+def mop(**b):
+    b.setdefault("confirm", True)
+    return call("/api/models", b)
+fake.mode, fake.comfy, fake.llm, fake.model = "idle", False, [], None; S.cache["t"] = 0
+c, v = call("/api/models?fresh=1")
+check(c == 200 and [m["key"] for m in v["catalog"]["models"]] == ["a3b", "9b"] and len(v["servers"]) == 2, "models view: catalog + builds")
+fv = {f["path"]: f for f in v["files"]}
+check(fv[U + "big.gguf"]["used_by"] == ["a3b"] and fv[r"D:\models\x\mmproj-f16.gguf"]["kind"] == "mmproj"
+      and not fv[U + "odd&name.gguf"]["name_ok"], "files: used_by, mmproj kind, unsafe names flagged")
+good = {"key": "spare", "name": "Spare 4B", "path": U + "spare.gguf", "serverExe": EXE, "args": "-ngl 99 -fa on -c 8192",
+        "port": 8086, "requiredVramMB": 4700, "alias": "", "notes": ""}
+check(mop(op="add", entry=good, confirm=False)[0] == 400, "model add needs confirm")
+bad_cases = [({"args": "-ngl 99 & calc"}, "shell char in args"), ({"args": '-c 4096 "x'}, "quote in args"),
+             ({"args": "-ngl 99 --port 9000"}, "forbidden --port"), ({"args": "--path=C:\\"}, "forbidden --path=..."),
+             ({"args": "--mmproj C:\\Windows\\x.gguf"}, "gguf in args not on Predator"),
+             ({"path": "C:\\Windows\\evil.gguf"}, "model file not found"), ({"path": U + "odd&name.gguf"}, "unsafe file name"),
+             ({"serverExe": "C:\\Windows\\System32\\calc.exe"}, "unknown server exe"), ({"port": 22}, "port range"),
+             ({"requiredVramMB": 99999}, "vram range"), ({"key": "A3B"}, "key pattern"), ({"key": "a3b"}, "duplicate key"),
+             ({"alias": "x y"}, "alias pattern"), ({"name": ""}, "empty name")]
+for patch, what in bad_cases:
+    check(mop(op="add", entry={**good, **patch})[0] == 400, "refused: " + what)
+check(not UPLOADED, "nothing written for refused entries")
+c, j = mop(op="add", entry=good)
+check(c == 200 and CAT["models"][-1]["key"] == "spare" and CAT["models"][-1]["alias"] == "spare"
+      and CAT["models"][-1]["log"] == U + "llama-server-spare.log" and "notes" not in CAT["models"][-1], "model added (alias, log defaulted)")
+check(any("bak-" in sc and "Copy-Item" in sc for sc in fake.scripts), "catalog backed up before write")
+check([m["key"] for m in S.models_catalog()][-1] == "spare", "switch list sees the new model at once")
+c, j = mop(op="edit", entry={**good, "key": "a3b", "path": U + "big.gguf", "name": "Big v2", "args": "-ngl 99 --cpu-moe -c 32768", "notes": "kept"})
+a = CAT["models"][0]
+check(c == 200 and a["name"] == "Big v2" and a["args"].endswith("32768") and a["log"] == U + "llama-server-a3b.log" and a["notes"] == "kept",
+      "edit keeps log path, changes fields")
+check(mop(op="edit", entry={**good, "key": "nope"})[0] == 409, "edit of unknown key refused")
+c, j = mop(op="default", key="spare"); check(c == 200 and CAT["defaultModel"] == "spare", "default set")
+fake.llm, fake.model, fake.mode = ["m"], "9b", "llm"; S.cache["t"] = 0
+check(mop(op="delete", key="9b")[0] == 409, "loaded model cannot be removed")
+c, j = mop(op="edit", entry={**good, "key": "9b", "path": U + "nine.gguf"})
+check(c == 200 and "until it is loaded again" in j["note"], "editing the loaded model says it applies on next load")
+fake.llm, fake.mode = [], "idle"; S.cache["t"] = 0
+c, j = mop(op="delete", key="spare"); check(c == 200 and CAT["defaultModel"] == "a3b" and len(CAT["models"]) == 2, "delete moves default")
+check(mop(op="delete_file", path=U + "big.gguf")[0] == 409, "file used by a model cannot be deleted")
+check(mop(op="delete_file", path="C:\\Windows\\win.ini")[0] == 400, "unknown file cannot be deleted")
+c, j = mop(op="delete_file", path=U + "spare.gguf"); check(c == 200 and U + "spare.gguf" not in FILES, "unused file deleted")
+c, l = call("/api/model_log?key=a3b"); check(c == 200 and "line2" in l["text"], "model log tail")
+check(call("/api/model_log?key=zzz")[0] == 400, "log of unknown key refused")
+# downloads
+for u in ("https://evil.com/a.gguf", "https://huggingface.co/a/b/resolve/main/x.gguf&calc", "https://huggingface.co/a/b/resolve/main/x.bin"):
+    check(mop(op="download", url=u)[0] == 400, "download link refused: " + u[:50])
+check(mop(op="download", url="https://huggingface.co/u/r/resolve/main/m.gguf", folder="..\\x")[0] == 400, "folder pattern enforced")
+c, j = mop(op="download", url="https://huggingface.co/u/Repo-GGUF/blob/main/sub/m-Q4.gguf?download=true")
+part = r"D:\models\Repo-GGUF\m-Q4.gguf.part"
+check(c == 200 and fake.curl and 'resolve/main/sub/m-Q4.gguf' in fake.curl[-1] and part in FILES, "download started via curl in its own process")
+check(mop(op="download", url="https://huggingface.co/u/Repo-GGUF/resolve/main/m-Q4.gguf")[0] == 409, "same download twice refused")
+c, d = call("/api/downloads"); dl = d["downloads"][0]
+check(dl["running"] and dl["total"] == 3e9 and dl["part"] == part, "download progress listed")
+check(mop(op="resume_download", part=part)[0] == 409, "resume of a running download refused")
+fake.curl = []
+c, j = mop(op="resume_download", part=part); check(c == 200 and "-C - " in fake.curl[-1], "stopped download resumes with curl -C -")
+c, j = mop(op="cancel_download", part=part); check(c == 200 and part not in FILES, "cancel stops curl and deletes the .part")
+S.hf_total = lambda url: 80e9
+check(mop(op="download", url="https://huggingface.co/u/r/resolve/main/huge.gguf")[0] == 409, "download refused when D: is too small")
+check(all("calc" not in sc for sc in fake.scripts) and all("calc" not in x for x in fake.calls), "no free text reached Predator")
 
 # ---- LOCAL mode (server runs ON Predator): commands run directly; Windows-path logic under a fake ----
 import subprocess, importlib

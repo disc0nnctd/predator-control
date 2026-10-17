@@ -10,7 +10,7 @@ existing HermesMode mechanism (mode_request.txt + `schtasks /run /tn HermesMode`
 Nothing here reads or stores prompts or model text; the action log holds time, action, short detail (mode/model key), result.
 Every /api call needs the one-time access token (~/.local/share/predator-control/token).
 """
-import collections, hmac, json, os, re, secrets, subprocess, threading, time, urllib.request
+import base64, collections, hmac, json, os, re, secrets, subprocess, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -39,7 +39,8 @@ HOST = os.environ.get("PREDATOR_HOST", "dcmini@100.105.14.41")
 SSH = ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes"]
 PRED = r"C:\Users\Public\HermesPredator"
 MODE_PS = rf"powershell -NoProfile -ExecutionPolicy Bypass -File {PRED}\mode.ps1 -Status"
-CATALOG_CMD = r"cmd /c type C:\Users\gamin\Experiments\llm_gaming_setup\llama_models.json 2>nul"
+CATALOG_PATH = r"C:\Users\gamin\Experiments\llm_gaming_setup\llama_models.json"
+CATALOG_CMD = rf"cmd /c type {CATALOG_PATH} 2>nul"
 QUEUE_CMD = ("powershell -NoProfile -Command \"try{(Invoke-RestMethod http://127.0.0.1:8188/prompt).exec_info.queue_remaining}"
              "catch{'none'}\"")
 COMFY_COUNT_CMD = ("powershell -NoProfile -Command \"(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and "
@@ -145,19 +146,27 @@ def load_log():
 
 
 # ---- reading Predator -----------------------------------------------------------------------------------------------
+def catalog_full():
+    """Predator's whole llama_models.json as a dict (every field), or None when it cannot be read."""
+    try:
+        d = json.loads(remote(CATALOG_CMD, timeout=20).lstrip("\ufeff"))
+        return d if isinstance(d, dict) and isinstance(d.get("models"), list) else None
+    except Exception:
+        return None
+
+
 def models_catalog():
     """[{key, name, vram_mb}] from Predator's own llama_models.json (cached 10 min)."""
     if time.time() - catalog_cache["t"] < 600 and catalog_cache["v"]:
         return catalog_cache["v"]
-    try:
-        out = []
-        for m in json.loads(remote(CATALOG_CMD, timeout=20).lstrip("\ufeff")).get("models", []):
-            if KEY_RE.match(str(m.get("key", ""))):
-                out.append({"key": m["key"], "name": str(m.get("name", m["key"]))[:80], "vram_mb": m.get("requiredVramMB")})
-        if out:
-            catalog_cache.update(t=time.time(), v=out)
-    except Exception:
-        pass
+    d = catalog_full() or {}
+    out = []
+    for m in d.get("models", []):
+        if KEY_RE.match(str(m.get("key", ""))):
+            out.append({"key": m["key"], "name": str(m.get("name", m["key"]))[:80], "vram_mb": m.get("requiredVramMB"),
+                        "default": m["key"] == d.get("defaultModel")})
+    if out:
+        catalog_cache.update(t=time.time(), v=out)
     return catalog_cache["v"]
 
 
@@ -358,6 +367,396 @@ def start_action(body):
     return {"accepted": True, "action": action["name"]}
 
 
+# ---- model management: the catalog, the GGUF files, downloads -------------------------------------------------------
+# The catalog's args end up in a .bat that switch_mode.ps1 runs as SYSTEM, so every field is checked against a strict
+# pattern, the model file and llama-server build must be ones actually found on Predator, and nothing a user types can
+# reach a shell unquoted. PowerShell scripts are sent with -EncodedCommand (no quoting games over ssh/cmd).
+ROOTS = (r"C:\Users\dcmini" + "\\", r"D:\models" + "\\")
+DL_ROOT = r"D:\models"
+DEFAULT_EXE = r"C:\Users\dcmini\turboquant-cuda\build\bin\llama-server.exe"  # switch_mode.ps1's default
+UPLOAD = r"C:\Users\dcmini\predator-control-catalog.upload.json"  # staged here, then copied over the catalog
+NEW_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
+ALIAS_RE = re.compile(r"^[A-Za-z0-9._-]{1,60}$")
+ARGS_RE = re.compile(r"^[A-Za-z0-9 ._=:,/\\+-]{0,400}$")  # no quotes, %, &, |, <, >, ^, ( )
+PATH_RE = re.compile(r"^[A-Za-z]:\\[A-Za-z0-9 ._\\()+-]+$")
+LOG_RE = re.compile(r"^[A-Za-z]:\\[A-Za-z0-9 ._\\()+-]+\.log$")
+FOLDER_RE = re.compile(r"^[A-Za-z0-9._-]{1,60}$")
+HF_RE = re.compile(r"^https://huggingface\.co/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/(?:resolve|blob)/([A-Za-z0-9._-]+)/"
+                   r"((?:[A-Za-z0-9._-]+/)*([A-Za-z0-9._-]+\.gguf))(?:\?download=true)?$")
+# set by switch_mode.ps1 itself, or would serve/write/fetch files outside what this page manages
+FORBIDDEN_ARGS = {"-m", "--model", "--host", "--port", "--alias", "--log-file", "--path", "--slot-save-path", "-mu",
+                  "--model-url", "-hf", "-hfr", "--hf-repo", "-hff", "--hf-file", "-hft", "--hf-token", "-dr", "--docker-repo",
+                  "--ssl-key-file", "--ssl-cert-file", "--api-key-file"}
+SCAN_PS = r"""$ProgressPreference='SilentlyContinue'
+$r = foreach ($root in 'C:\Users\dcmini','D:\models') { Get-ChildItem -Path $root -Recurse -File -Include *.gguf,*.gguf.part,llama-server.exe -ErrorAction SilentlyContinue }
+$f = @($r | Where-Object { $_.FullName -notmatch '\\(ggml-vocab|AppData|ComfyUI)' } | ForEach-Object { [pscustomobject]@{p=$_.FullName;s=$_.Length;t=$_.LastWriteTime.ToString('yyyy-MM-dd HH:mm')} })
+$d = @(Get-PSDrive C,D -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{n=$_.Name;free=$_.Free} })
+[pscustomobject]@{files=$f;disks=$d} | ConvertTo-Json -Compress -Depth 4"""
+# (a directory listing shows 0 bytes for a file curl still holds open, so the size is read through a handle)
+DL_PS = r"""$ProgressPreference='SilentlyContinue'
+function Size($f) { try { $h = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite'); $n = $h.Length; $h.Close(); $n } catch { $f.Length } }
+$p = @(Get-ChildItem -Path 'D:\models' -Recurse -File -Filter *.gguf.part -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{p=$_.FullName;s=(Size $_)} })
+$c = @(Get-CimInstance Win32_Process -Filter "Name='curl.exe'" | ForEach-Object { "$($_.CommandLine)" })
+[pscustomobject]@{parts=$p;curl=$c} | ConvertTo-Json -Compress -Depth 4"""
+scan_cache = {"t": 0.0, "v": None}
+downloads = {}  # part path -> {"url", "total"}; persisted in DATA/downloads.json
+
+
+def ps(script):
+    return "powershell -NoProfile -NonInteractive -EncodedCommand " + base64.b64encode(script.encode("utf-16-le")).decode()
+
+
+def ps_quote(s):
+    """A PowerShell single-quoted literal. Callers have already pattern-checked s (no quotes allowed anyway)."""
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def put_text(text, path):
+    """Put a file on Predator: scp (ssh mode) or a plain write (LOCAL mode). Tests replace this."""
+    if LOCAL:
+        Path(path).write_text(text, encoding="utf-8")
+        return
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
+        fh.write(text)
+        tmp = fh.name
+    try:
+        r = subprocess.run(["scp", "-q", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", tmp,
+                            f"{HOST}:{path.replace(chr(92), '/')}"], capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            raise RuntimeError("upload to Predator failed: " + (r.stderr or "").strip()[:120])
+    finally:
+        os.unlink(tmp)
+
+
+def jload(out):
+    out = (out or "").strip().lstrip("\ufeff")
+    return json.loads(out.splitlines()[-1]) if out else None
+
+
+def as_list(x):
+    return [] if x is None else x if isinstance(x, list) else [x]
+
+
+def under_roots(p):
+    return any(p.lower().startswith(r.lower()) for r in ROOTS)
+
+
+def scan_files(fresh=False):
+    """GGUF files, llama-server builds and free disk on Predator (a ~10 s walk, cached 2 min)."""
+    if fresh or scan_cache["v"] is None or time.time() - scan_cache["t"] > 120:
+        try:
+            d = jload(remote(ps(SCAN_PS), timeout=90)) or {}
+        except Exception:
+            d = None
+        if d is not None:
+            files, servers = [], []
+            for f in as_list(d.get("files")):
+                p = str(f.get("p", ""))
+                if not under_roots(p):
+                    continue
+                if p.lower().endswith("llama-server.exe"):
+                    if PATH_RE.match(p):
+                        servers.append(p)
+                    continue
+                low = p.lower().rsplit("\\", 1)[-1]
+                kind = "part" if low.endswith(".part") else "mmproj" if low.startswith("mmproj") else "model"
+                files.append({"path": p, "size": f.get("s"), "time": f.get("t"), "kind": kind, "name_ok": bool(PATH_RE.match(p))})
+            disks = {str(x.get("n")): x.get("free") for x in as_list(d.get("disks"))}
+            scan_cache.update(t=time.time(), v={"files": files, "servers": sorted(servers), "disks": disks,
+                                                "scanned_at": time.strftime("%H:%M:%S")})
+    return scan_cache["v"]
+
+
+def load_downloads():
+    try:
+        downloads.update(json.loads((DATA / "downloads.json").read_text()))
+    except Exception:
+        pass
+
+
+def save_downloads():
+    try:
+        DATA.mkdir(parents=True, exist_ok=True)
+        (DATA / "downloads.json").write_text(json.dumps(downloads))
+    except OSError:
+        pass
+
+
+def download_status():
+    """Unfinished downloads: each .gguf.part under D:\\models, its size, the expected size, and whether curl is still on it."""
+    try:
+        d = jload(remote(ps(DL_PS), timeout=40)) or {}
+    except Exception:
+        return None
+    curl = [c.lower() for c in as_list(d.get("curl"))]
+    out = []
+    for p in as_list(d.get("parts")):
+        path = str(p.get("p", ""))
+        meta = downloads.get(path, {})
+        out.append({"part": path, "file": path[:-5], "size": p.get("s"), "total": meta.get("total"), "url": meta.get("url"),
+                    "running": any(path.lower() in c for c in curl)})
+    return out
+
+
+def model_view(fresh=False):
+    cat = catalog_full()
+    sc = scan_files(fresh) or {"files": [], "servers": [], "disks": {}, "scanned_at": None}
+    used = {}
+    for m in (cat or {}).get("models", []):
+        for p in [m.get("path", "")] + [a for a in str(m.get("args", "")).split() if a.lower().endswith(".gguf")]:
+            used.setdefault(str(p).lower(), []).append(m.get("key"))
+    files = [{**f, "used_by": used.get(f["path"].lower(), [])} for f in sc["files"]]
+    return {"catalog": cat, "files": files, "servers": sc["servers"], "default_exe": DEFAULT_EXE, "disks": sc["disks"],
+            "scanned_at": sc["scanned_at"]}
+
+
+def hf_total(url):
+    """Size in bytes of a Hugging Face file (one-byte range request), or None."""
+    try:
+        req = urllib.request.Request(url, headers={"Range": "bytes=0-0", "User-Agent": "predator-control"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            cr = r.headers.get("Content-Range", "")
+            if "/" in cr:
+                return int(cr.rsplit("/", 1)[1])
+            return int(r.headers.get("Content-Length") or 0) or None
+    except Exception:
+        return None
+
+
+def check_entry(e, cat, sc, new):
+    """A clean catalog entry from the page's form, or Refuse with the first problem in plain words."""
+    if not isinstance(e, dict):
+        raise Refuse("Bad model entry.", 400)
+    key = str(e.get("key", "")).strip()
+    if new and not NEW_KEY_RE.match(key):
+        raise Refuse("Key: lowercase letters, digits, dot, dash or underscore (max 40), e.g. qwen9b-q4.", 400)
+    keys = [m.get("key") for m in cat["models"]]
+    if new and key.lower() in [str(k).lower() for k in keys]:
+        raise Refuse(f"There is already a model with key '{key}'.", 400)
+    if not new and key not in keys:
+        raise Refuse("That model is no longer in the catalog (reload).", 409)
+    name = re.sub(r"[\x00-\x1f\x7f]", "", str(e.get("name", ""))).strip()
+    if not 1 <= len(name) <= 80:
+        raise Refuse("Name: 1 to 80 characters.", 400)
+    path = str(e.get("path", ""))
+    if path not in [f["path"] for f in sc["files"] if f["kind"] == "model" and f["name_ok"]]:
+        raise Refuse("Model file: pick one of the .gguf files found on Predator (reload the file list if it is new).", 400)
+    exe = str(e.get("serverExe", ""))
+    if exe not in sc["servers"]:
+        raise Refuse("llama-server build: pick one of the builds found on Predator.", 400)
+    args = " ".join(str(e.get("args", "")).split())
+    if not ARGS_RE.match(args):
+        raise Refuse("Arguments: only letters, digits, spaces and . _ = : , / \\ + - (no quotes or shell characters).", 400)
+    bad = [a for a in args.split() if a.split("=", 1)[0] in FORBIDDEN_ARGS]
+    if bad:
+        raise Refuse(f"Arguments: {bad[0]} is set by Predator itself or not allowed here.", 400)
+    for a in args.split():
+        if a.lower().endswith(".gguf") and a not in [f["path"] for f in sc["files"] if f["name_ok"]]:
+            raise Refuse(f"Arguments: {a} is not a .gguf file found on Predator.", 400)
+    try:
+        port = int(e.get("port"))
+        vram = int(e.get("requiredVramMB") or 0)
+    except (TypeError, ValueError):
+        raise Refuse("Port and VRAM must be whole numbers.", 400)
+    if not 8080 <= port <= 8099:
+        raise Refuse("Port: 8080 to 8099.", 400)
+    if not 0 <= vram <= 6144:
+        raise Refuse("VRAM needed: 0 to 6144 MB (the card has 6 GB; with --cpu-moe count only what stays on the GPU).", 400)
+    alias = str(e.get("alias", "")).strip() or key
+    if not ALIAS_RE.match(alias):
+        raise Refuse("Alias: letters, digits, dot, dash or underscore (max 60).", 400)
+    notes = re.sub(r"[\x00-\x1f\x7f]", " ", str(e.get("notes", ""))).strip()[:600]
+    return {"key": key, "name": name, "path": path, "port": port, "alias": alias, "args": args, "requiredVramMB": vram,
+            "serverExe": exe, "notes": notes}
+
+
+def write_catalog(cat):
+    """Back up the live catalog next to itself (newest 10 kept), then overwrite it in place (keeps its ACL)."""
+    text = json.dumps(cat, indent=2, ensure_ascii=False) + "\n"
+    put_text(text, UPLOAD)
+    out = remote(ps(f"""$ErrorActionPreference='Stop'
+$up={ps_quote(UPLOAD)}; $dst={ps_quote(CATALOG_PATH)}
+try {{
+$t=[IO.File]::ReadAllText($up)
+$null = $t | ConvertFrom-Json
+Copy-Item -LiteralPath $dst -Destination ($dst + '.bak-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+[IO.File]::WriteAllText($dst, $t)
+Remove-Item -LiteralPath $up
+Get-ChildItem -Path (Split-Path $dst) -Filter 'llama_models.json.bak-*' | Sort-Object Name -Descending | Select-Object -Skip 10 | Remove-Item
+'WROTE' }} catch {{ 'ERR ' + $_.Exception.Message }}"""), timeout=60)
+    if "WROTE" not in (out or ""):
+        if LOCAL and "denied" in (out or "").lower():
+            raise Refuse("This copy of the page runs on Predator without admin rights, so it cannot change the catalog: "
+                         "use the dcmini page (dcmini-1...:8793) for that.", 403)
+        raise Refuse("Predator did not confirm the catalog write; nothing was changed.", 502)
+    if catalog_full() != json.loads(text):
+        raise Refuse("The catalog on Predator does not match what was written; check it (a .bak copy was kept).", 502)
+    catalog_cache["t"] = 0.0
+    cache["t"] = 0.0
+
+
+def model_op(body):
+    """One model-management change, done synchronously under the action lock. Returns a small result dict."""
+    op = body.get("op")
+    if body.get("confirm") is not True:
+        raise Refuse("This needs an explicit confirmation.", 400)
+    if op not in ("add", "edit", "delete", "default", "delete_file", "download", "cancel_download", "resume_download"):
+        raise Refuse("Unknown model operation.", 400)
+    with lock:
+        if action["running"]:
+            raise Refuse(f"Another action is still running ({action['name']}: {action['stage']}).")
+        st = status(fresh=True)
+        if not st["reachable"]:
+            raise Refuse("Predator cannot be reached (asleep, off or no tailnet).", 503)
+        if st["pending"]:
+            raise Refuse("A mode switch is pending on Predator; wait a minute.")
+        if op in ("download", "cancel_download", "resume_download"):
+            return download_op(op, body)
+        cat = catalog_full()
+        if cat is None:
+            raise Refuse("Could not read Predator's model catalog.", 502)
+        loaded = st.get("set_model") if st.get("llama_running") else None
+        if op in ("add", "edit"):
+            sc = scan_files(fresh=False) or {"files": [], "servers": []}
+            e = check_entry(body.get("entry"), cat, sc, op == "add")
+            if op == "add":
+                e["log"] = rf"C:\Users\dcmini\llama-server-{e['key']}.log"
+                cat["models"].append({k: v for k, v in e.items() if v != "" or k == "args"})
+            else:
+                i = next(i for i, m in enumerate(cat["models"]) if m.get("key") == e["key"])
+                old = dict(cat["models"][i])
+                old.update({k: v for k, v in e.items() if k != "notes"})
+                if e["notes"]:
+                    old["notes"] = e["notes"]
+                else:
+                    old.pop("notes", None)
+                cat["models"][i] = old
+            write_catalog(cat)
+            log("model_" + op, e["key"], "ok")
+            return {"ok": True, "note": "Saved. A model that is loaded now keeps its old settings until it is loaded again."
+                    if loaded == e["key"] else "Saved."}
+        if op in ("delete", "default"):
+            key = body.get("key")
+            if key not in [m.get("key") for m in cat["models"]]:
+                raise Refuse("Unknown model key.", 400)
+            if op == "default":
+                cat["defaultModel"] = key
+            else:
+                if loaded == key:
+                    raise Refuse("That model is loaded right now: switch to another mode first.")
+                if len(cat["models"]) == 1:
+                    raise Refuse("It is the only model in the catalog; add another one first.")
+                cat["models"] = [m for m in cat["models"] if m.get("key") != key]
+                if cat.get("defaultModel") == key:
+                    cat["defaultModel"] = cat["models"][0]["key"]
+            write_catalog(cat)
+            log("model_" + op, key, "ok")
+            return {"ok": True, "note": "Removed from the catalog (the .gguf file is kept)." if op == "delete" else "Default set."}
+        # delete_file
+        path = body.get("path")
+        sc = scan_files(fresh=True) or {"files": []}
+        f = next((f for f in sc["files"] if f["path"] == path), None)
+        if not isinstance(path, str) or f is None or not f["name_ok"] or not under_roots(path):
+            raise Refuse("That file is not one of the .gguf files found on Predator.", 400)
+        users = [m.get("key") for m in cat["models"]
+                 if str(m.get("path", "")).lower() == path.lower() or path.lower() in str(m.get("args", "")).lower()]
+        if users:
+            raise Refuse(f"Model(s) {', '.join(users)} use this file: delete them from the catalog first.")
+        if f["kind"] == "part" and any(d["running"] and d["part"] == path for d in (download_status() or [])):
+            raise Refuse("That download is still running: cancel it instead.")
+        out = remote(ps(f"$ErrorActionPreference='Stop'; Remove-Item -LiteralPath {ps_quote(path)}; 'DELETED'"), timeout=60)
+        scan_cache["t"] = 0.0
+        if "DELETED" not in (out or ""):
+            raise Refuse("Predator did not confirm the delete.", 502)
+        downloads.pop(path, None)
+        save_downloads()
+        log("delete_file", path.rsplit("\\", 1)[-1], "ok")
+        return {"ok": True, "note": f"Deleted {path.rsplit(chr(92), 1)[-1]} (freed {round((f['size'] or 0) / 1e9, 1)} GB)."}
+
+
+def start_curl(url, part, dest, resume):
+    """curl in its own process via WMI, so it outlives this ssh call (and this server). Renames .part on success."""
+    cmd = (f'cmd.exe /c curl.exe -L --fail -s -S {"-C - " if resume else ""}-o "{part}" "{url}" '
+           f'&& move /y "{part}" "{dest}" >nul')
+    folder = dest.rsplit("\\", 1)[0]
+    out = remote(ps(f"""$ErrorActionPreference='Stop'
+New-Item -ItemType Directory -Force -Path {ps_quote(folder)} | Out-Null
+$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine={ps_quote(cmd)}}}
+'STARTED ' + $r.ReturnValue"""), timeout=60)
+    if "STARTED 0" not in (out or ""):
+        raise Refuse("Predator could not start the download: " + (out or "").strip()[-120:], 502)
+
+
+def download_op(op, body):
+    if op == "download":
+        url = str(body.get("url", "")).strip()
+        m = HF_RE.match(url)
+        if not m:
+            raise Refuse("Paste a Hugging Face file link ending in .gguf, e.g. "
+                         "https://huggingface.co/<user>/<repo>/resolve/main/<file>.gguf", 400)
+        url = f"https://huggingface.co/{m[1]}/{m[2]}/resolve/{m[3]}/{m[4]}"
+        folder = str(body.get("folder", "")).strip() or m[2]
+        if not FOLDER_RE.match(folder):
+            raise Refuse("Folder: letters, digits, dot, dash or underscore (max 60).", 400)
+        dest = rf"{DL_ROOT}\{folder}\{m[5]}"
+        part = dest + ".part"
+        sc = scan_files(fresh=True) or {"files": [], "disks": {}}
+        if any(f["path"].lower() in (dest.lower(), part.lower()) for f in sc["files"]):
+            raise Refuse(f"{dest} (or an unfinished download of it) already exists on Predator.")
+        total = hf_total(url)
+        if not total:
+            raise Refuse("Could not reach that file on Hugging Face (wrong link, or a gated model that needs a login).", 400)
+        free = sc["disks"].get("D")
+        if free is not None and total > free - 5_000_000_000:
+            raise Refuse(f"Not enough room on D: ({round(free / 1e9, 1)} GB free, file is {round(total / 1e9, 1)} GB, "
+                         "5 GB kept spare).")
+        start_curl(url, part, dest, False)
+        downloads[part] = {"url": url, "total": total}
+        save_downloads()
+        log("download", m[5], f"started ({round(total / 1e9, 1)} GB)")
+        return {"ok": True, "note": f"Downloading {m[5]} ({round(total / 1e9, 1)} GB) to {dest}."}
+    part = body.get("part")
+    cur = next((d for d in (download_status() or []) if d["part"] == part), None)
+    if not isinstance(part, str) or cur is None:
+        raise Refuse("No such unfinished download.", 400)
+    if op == "resume_download":
+        meta = downloads.get(part)
+        if cur["running"]:
+            raise Refuse("It is still running.")
+        if not meta or not HF_RE.match(meta.get("url", "")):
+            raise Refuse("This page did not start that download, so it does not know the link: delete it and start again.")
+        start_curl(meta["url"], part, part[:-5], True)
+        log("download_resume", part.rsplit("\\", 1)[-1][:-5], "ok")
+        return {"ok": True, "note": "Resumed."}
+    out = remote(ps(f"""$p={ps_quote(part)}
+Get-CimInstance Win32_Process -Filter "Name='curl.exe'" | Where-Object {{ "$($_.CommandLine)".ToLower().Contains($p.ToLower()) }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}
+Start-Sleep -Seconds 1
+Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $p) {{ 'LEFT' }} else {{ 'CANCELLED' }}"""), timeout=60)
+    if "CANCELLED" not in (out or ""):
+        raise Refuse("Predator did not confirm the cancel.", 502)
+    downloads.pop(part, None)
+    save_downloads()
+    scan_cache["t"] = 0.0
+    log("download_cancel", part.rsplit("\\", 1)[-1][:-5], "ok")
+    return {"ok": True, "note": "Cancelled and the partial file deleted."}
+
+
+def model_log(key):
+    """Last 80 lines of one catalog model's llama-server log (path from the catalog, pattern-checked)."""
+    cat = catalog_full() or {"models": []}
+    m = next((m for m in cat["models"] if m.get("key") == key), None)
+    if m is None:
+        raise Refuse("Unknown model key.", 400)
+    lp = str(m.get("log", ""))
+    if not LOG_RE.match(lp):
+        raise Refuse("That model has no readable log path in the catalog.", 400)
+    out = remote(ps(f"""$p={ps_quote(lp)}
+if (Test-Path -LiteralPath $p) {{ Get-Content -LiteralPath $p -Tail 80 }} else {{ '(no log file yet: ' + $p + ')' }}"""), timeout=40)
+    return {"key": key, "path": lp, "text": (out or "")[-20000:]}
+
+
 # ---- access token ---------------------------------------------------------------------------------------------------
 def load_token():
     global TOKEN
@@ -414,6 +813,16 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, status())
         if p == "/api/log" and self.auth():
             return self.send(200, {"log": list(log_ram)[-60:]})
+        q = dict(x.split("=", 1) for x in self.path.partition("?")[2].split("&") if "=" in x)
+        if p == "/api/models" and self.auth():
+            return self.send(200, model_view(fresh=q.get("fresh") == "1"))
+        if p == "/api/downloads" and self.auth():
+            return self.send(200, {"downloads": download_status()})
+        if p == "/api/model_log" and self.auth():
+            try:
+                return self.send(200, model_log(q.get("key", "")))
+            except Refuse as e:
+                return self.send(e.code, {"error": e.msg})
         if not p.startswith("/api/"):
             self.send(404, {"error": "not found"})
 
@@ -435,6 +844,21 @@ class H(BaseHTTPRequestHandler):
             TOKEN = new
             log("password", "", "changed")
             return self.send(200, {"ok": True})
+        if self.path == "/api/models":
+            if not self.auth():
+                return None
+            try:
+                body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 16384)) or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError
+            except Exception:
+                return self.send(400, {"error": "Bad request."})
+            try:
+                return self.send(200, model_op(body))
+            except Refuse as e:
+                return self.send(e.code, {"error": e.msg})
+            except Exception as e:
+                return self.send(500, {"error": "Unexpected error: " + str(e)[:100]})
         if self.path != "/api/action" or not self.auth():
             return None if self.path == "/api/action" else self.send(404, {"error": "not found"})
         try:
@@ -455,6 +879,7 @@ class H(BaseHTTPRequestHandler):
 def main():
     load_token()
     load_log()
+    load_downloads()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
     print(f"predator-control on 127.0.0.1:{PORT} ({'LOCAL mode, commands run on this machine' if LOCAL else 'ssh to ' + HOST})", flush=True)
     srv.serve_forever()

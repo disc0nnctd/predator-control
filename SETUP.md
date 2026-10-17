@@ -30,6 +30,22 @@ New token: delete the token file and restart the service.
   allowed beside a running model or in llm/gaming mode.
 - Log: `~/.local/share/predator-control/actions.log` (time, action, mode/model key, result), also last 200 in RAM.
 
+## Models section (full model management)
+
+- **Catalog** (`C:\Users\gamin\Experiments\llm_gaming_setup\llama_models.json`): add, edit, remove, make default, load, view a
+  model's llama-server log. Every write first copies the live file to `llama_models.json.bak-<time>` next to it (newest 10 kept),
+  then overwrites it in place (keeps its ACL) and reads it back to confirm.
+- **Files**: every `.gguf` under `C:\Users\dcmini` and `D:\models` (vocab/ComfyUI skipped), size, which models use it; delete
+  unused ones. Builds: every `llama-server.exe` found there.
+- **Download**: a Hugging Face `.gguf` link -> `D:\models\<folder>\`. curl runs in its own process (WMI), so it survives
+  the page/ssh; `.part` until done, then renamed. Cancel / resume (`curl -C -`). Refused if D: would keep < 5 GB free.
+- Safety: the catalog's args land in a .bat that `switch_mode.ps1` runs as SYSTEM, so: model file and build must be ones found
+  on Predator; args only `[A-Za-z0-9 ._=:,/\+-]` (no quotes or shell characters), and `-m/--port/--alias/--host/--path/
+  --log-file/-hf...` are refused; key/alias/port (8080-8099)/VRAM (<= 6144 MB) pattern-checked; key cannot be renamed; the
+  loaded model cannot be removed. PowerShell goes over ssh as `-EncodedCommand`.
+- The copy running ON Predator (LOCAL mode, non-admin task) can list/download/delete files but cannot write the catalog: use
+  the dcmini page for catalog changes.
+
 ## Tests
 
 `python3 ~/predator-control/tests/check.py` uses a fake Predator (never touches the real one). `--live` adds one read-only real status read.

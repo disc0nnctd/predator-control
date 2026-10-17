@@ -37,6 +37,13 @@ dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);bord
 dialog::backdrop{background:#000a}
 table{width:100%;border-collapse:collapse;font-size:.85rem}td{padding:3px 6px;border-bottom:1px solid var(--line);vertical-align:top}
 .hide{display:none}
+.mrow{border-top:1px solid var(--line);padding:8px 0}.mrow:first-child{border-top:0}
+.mrow .t{font-weight:600}.mrow .d{color:var(--mute);font-size:.85rem;word-break:break-all}
+.mrow .row button{min-height:36px;padding:6px 10px;font-size:.88rem}
+label.f{display:block;font-size:.85rem;color:var(--mute);margin-top:8px}
+label.f input,label.f select,label.f textarea{display:block;width:100%;margin-top:2px;font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line);background:#0c1117;color:var(--ink)}
+#edit{max-width:560px}
+pre{white-space:pre-wrap;word-break:break-all;font-size:.75rem;max-height:60vh;overflow:auto;background:#0c1117;padding:8px;border-radius:8px}
 </style></head><body>
 <h1>Predator control</h1>
 
@@ -65,6 +72,19 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}td{padding:3px 6px;bo
   <div class="card" data-mode="gaming"><h3>Gaming</h3><p>No models; Predator gets its gaming profile. Stops ComfyUI and any model.</p><button data-sw="gaming">Switch to Gaming</button></div>
   <div class="card" data-mode="idle"><h3>Idle</h3><p>Stops every model; nothing owns the GPU.</p><button data-sw="idle">Switch to Idle</button></div>
 
+  <h2>Models on Predator</h2>
+  <div class="card"><div class="row" style="justify-content:space-between"><h3>Catalog</h3>
+    <div class="row"><button class="sec" id="madd">+ Add model</button><button class="sec" id="mrefresh">Rescan files</button></div></div>
+    <p>What the “Language model” switch can load. Changes take effect the next time a model is loaded. Every save keeps a backup of the old catalog on Predator.</p>
+    <div id="mlist">Loading…</div></div>
+  <div class="card"><h3>Model files</h3><p id="disks"></p><div id="flist"></div></div>
+  <div class="card"><h3>Download a model</h3>
+    <p>Paste a Hugging Face link to one <code>.gguf</code> file. It is saved under <code>D:\models\&lt;folder&gt;</code> on Predator and keeps downloading if you close this page.</p>
+    <label class="f">Link<input type="text" id="dlurl" placeholder="https://huggingface.co/user/repo/resolve/main/model-Q4_K_M.gguf"></label>
+    <label class="f">Folder (optional, default: repo name)<input type="text" id="dlfolder" placeholder="e.g. qwen3-8b"></label>
+    <div class="row" style="margin-top:8px"><button id="dlgo">Download</button></div>
+    <div id="dllist" style="margin-top:8px"></div></div>
+
   <h2>Single tools</h2>
   <div class="card"><h3>ComfyUI (picture engine)</h3><p id="comfyinfo"></p>
     <div class="row"><button class="sec" data-act="comfy_start">Start</button><button class="sec" data-act="comfy_stop">Stop</button><button class="sec" data-act="comfy_restart">Restart</button></div></div>
@@ -77,6 +97,22 @@ table{width:100%;border-collapse:collapse;font-size:.85rem}td{padding:3px 6px;bo
 </div>
 
 <dialog id="dlg"><form method="dialog"><p id="dtxt"></p><div class="row" style="justify-content:flex-end"><button class="sec" value="no">Cancel</button><button value="yes" id="dyes">Yes, do it</button></div></form></dialog>
+
+<dialog id="edit"><form method="dialog" id="eform">
+  <h3 id="etitle" style="margin:0">Model</h3>
+  <label class="f">Key (short id, cannot be changed later)<input type="text" id="e_key"></label>
+  <label class="f">Name<input type="text" id="e_name"></label>
+  <label class="f">Model file<select id="e_path"></select></label>
+  <label class="f">llama-server build<select id="e_exe"></select></label>
+  <label class="f">Arguments (no -m/--port/--alias/--host: those are added for you)<textarea id="e_args" rows="3"></textarea></label>
+  <div class="row"><label class="f" style="flex:1">Port (8080-8099)<input type="text" id="e_port" inputmode="numeric"></label>
+    <label class="f" style="flex:1">VRAM needed, MB<input type="text" id="e_vram" inputmode="numeric"></label></div>
+  <label class="f">Alias (model name the API reports)<input type="text" id="e_alias"></label>
+  <label class="f">Notes<textarea id="e_notes" rows="2"></textarea></label>
+  <div id="eerr" style="color:var(--bad);min-height:1.2em;margin-top:6px"></div>
+  <div class="row" style="justify-content:flex-end"><button class="sec" value="cancel" formnovalidate>Cancel</button><button type="button" id="esave">Save</button></div>
+</form></dialog>
+<dialog id="logdlg"><form method="dialog"><h3 id="logt" style="margin:0 0 6px"></h3><pre id="logtxt"></pre><div class="row" style="justify-content:flex-end"><button class="sec">Close</button></div></form></dialog>
 
 <script>
 const $=id=>document.getElementById(id);
@@ -124,7 +160,8 @@ function render(s){
   kv(rows);
   // model list
   const sel=$('model'),cur=sel.value;
-  if(s.models.length&&sel.options.length!==s.models.length){sel.replaceChildren();for(const x of s.models){const o=document.createElement('option');o.value=x.key;o.textContent=x.name+(x.vram_mb?` (~${(x.vram_mb/1000).toFixed(1)} GB)`:'')+' ['+x.key+']';sel.append(o)}if(cur)sel.value=cur}
+  const sig=JSON.stringify(s.models);
+  if(s.models.length&&sel.dataset.sig!==sig){sel.dataset.sig=sig;sel.replaceChildren();for(const x of s.models){const o=document.createElement('option');o.value=x.key;o.textContent=x.name+(x.vram_mb?` (~${(x.vram_mb/1000).toFixed(1)} GB)`:'')+' ['+x.key+']'+(x.default?' · default':'');sel.append(o)}if(cur)sel.value=cur}
   // busy indicator
   const a=s.action||{};
   $('busy').classList.toggle('on',!!a.running);
@@ -148,7 +185,7 @@ async function tick(){
   const r=await api('/api/status');
   if(r.status===200){render(r.j);if(n++%3===0)pollLog()}
 }
-function start(){$('login').classList.add('hide');$('app').classList.remove('hide');tick();clearInterval(timer);timer=setInterval(tick,3000)}
+function start(){$('login').classList.add('hide');$('app').classList.remove('hide');tick();clearInterval(timer);timer=setInterval(tick,3000);loadModels(false)}
 
 function ask(text){return new Promise(res=>{$('dtxt').textContent=text;const d=$('dlg');d.onclose=()=>res(d.returnValue==='yes');d.showModal()})}
 
@@ -173,5 +210,117 @@ document.addEventListener('click',e=>{
     send({action:b.dataset.act},t);
   }
 });
+
+// ---- model management ----
+let M=null;
+const GB=b=>b==null?'?':(b/1e9).toFixed(1)+' GB';
+const base=p=>String(p||'').split('\\').pop();
+function el(tag,txt,cls){const e=document.createElement(tag);if(txt!=null)e.textContent=txt;if(cls)e.className=cls;return e}
+function btn(txt,fn,cls){const b=el('button',txt,cls||'sec');b.type='button';b.onclick=fn;return b}
+async function loadModels(fresh){
+  $('mlist').textContent=fresh?'Scanning Predator (about 10 s)…':($('mlist').textContent||'Loading…');
+  const r=await api('/api/models'+(fresh?'?fresh=1':''));
+  if(r.status!==200){$('mlist').textContent=r.j.error||'Could not load.';return}
+  M=r.j;renderModels();loadDownloads();
+}
+function renderModels(){
+  const L=$('mlist');L.replaceChildren();
+  const cat=M.catalog;
+  if(!cat){L.textContent='Could not read the catalog on Predator.';return}
+  const running=S&&S.llama_running&&S.llama_running.length?S.set_model:null;
+  for(const m of cat.models){
+    const d=el('div',null,'mrow');
+    const t=el('div',m.name+'  ','t');
+    t.append(el('span',m.key,'pill'));
+    if(m.key===cat.defaultModel)t.append(' ',el('span','default','pill ok'));
+    if(m.key===running)t.append(' ',el('span','loaded now','pill warn'));
+    const f=M.files.find(x=>x.path.toLowerCase()===String(m.path).toLowerCase());
+    d.append(t,el('div',`${base(m.path)} (${f?GB(f.size):'FILE MISSING'}) · port ${m.port} · ~${m.requiredVramMB||'?'} MB VRAM · ${base(String(m.serverExe||M.default_exe).replace(/\\[^\\]*$/,''))||'default build'}`,'d'),
+      el('div',m.args||'(no extra arguments)','d'));
+    if(m.notes)d.append(el('div','Note: '+m.notes,'d'));
+    const row=el('div',null,'row');row.style.marginTop='6px';
+    row.append(btn('Load',()=>send({action:'switch',mode:'llm',model:m.key},`Load "${m.name}" on Predator now? ComfyUI and any running model are stopped (a few minutes).`),''),
+      btn('Edit',()=>openEdit(m)),btn('Log',()=>showLog(m.key)));
+    if(m.key!==cat.defaultModel)row.append(btn('Make default',()=>mop({op:'default',key:m.key},`Make "${m.name}" the default model?`)));
+    row.append(btn('Remove',()=>mop({op:'delete',key:m.key},`Remove "${m.name}" from the catalog? The .gguf file stays on disk.`),'danger'));
+    d.append(row);L.append(d);
+  }
+  // files
+  $('disks').textContent=Object.entries(M.disks||{}).map(([k,v])=>`${k}: ${GB(v)} free`).join(' · ')+(M.scanned_at?` · scanned ${M.scanned_at}`:'');
+  const F=$('flist');F.replaceChildren();
+  for(const f of M.files.filter(x=>x.kind!=='part')){
+    const d=el('div',null,'mrow');
+    d.append(el('div',base(f.path)+(f.kind==='mmproj'?'  (vision projector)':''),'t'),
+      el('div',`${f.path} · ${GB(f.size)} · ${f.time||''}`+(f.used_by.length?` · used by ${f.used_by.join(', ')}`:' · not in the catalog'),'d'));
+    const row=el('div',null,'row');row.style.marginTop='6px';
+    if(f.kind==='model'&&f.name_ok)row.append(btn('Add to catalog',()=>openEdit(null,f.path)));
+    if(!f.name_ok)row.append(el('span','name has unsupported characters; rename it on Predator','d'));
+    if(!f.used_by.length&&f.name_ok)row.append(btn('Delete file',()=>mop({op:'delete_file',path:f.path},`DELETE ${base(f.path)} (${GB(f.size)}) from Predator's disk? This cannot be undone.`),'danger'));
+    d.append(row);F.append(d);
+  }
+}
+async function mop(body,text){
+  if(text&&!await ask(text))return;
+  body.confirm=true;$('msg').textContent='Working…';
+  const r=await api('/api/models',body);
+  $('msg').textContent=r.status===200?(r.j.note||'Done.'):(r.j.error||'Refused.');
+  if(r.status===200){tick();await loadModels(body.op==='delete_file'||body.op==='download'||body.op==='cancel_download')}
+  return r;
+}
+function opts(sel,list,cur,label){sel.replaceChildren();for(const v of list){const o=el('option',label?label(v):v);o.value=v;sel.append(o)}if(cur!=null){if(!list.includes(cur)){const o=el('option',cur+' (not found on Predator)');o.value=cur;sel.prepend(o)}sel.value=cur}}
+let editing=null;
+function openEdit(m,path){
+  editing=m;const isNew=!m;
+  $('etitle').textContent=isNew?'Add a model':'Edit '+m.key;
+  $('e_key').value=isNew?base(path||'').replace(/\.gguf$/i,'').toLowerCase().replace(/[^a-z0-9._-]+/g,'-').slice(0,40):m.key;$('e_key').disabled=!isNew;
+  $('e_name').value=isNew?base(path||'').replace(/\.gguf$/i,''):m.name;
+  const models=M.files.filter(f=>f.kind==='model'&&f.name_ok).map(f=>f.path);
+  opts($('e_path'),models,isNew?(path||models[0]):m.path,p=>{const f=M.files.find(x=>x.path===p);return base(p)+' ('+GB(f&&f.size)+') — '+p});
+  const exes=M.servers;
+  opts($('e_exe'),exes,isNew?(exes.find(x=>/llama-b\d+/.test(x))||M.default_exe):(m.serverExe||M.default_exe));
+  $('e_args').value=isNew?'-ngl 99 -fa on -c 8192 --jinja':(m.args||'');
+  const used=new Set(M.catalog.models.map(x=>x.port));let fp=8086;while(used.has(fp)&&fp<8099)fp++;
+  $('e_port').value=isNew?fp:m.port;
+  const f=M.files.find(x=>x.path===$('e_path').value);
+  $('e_vram').value=isNew?Math.min(6144,Math.round((f&&f.size||0)/1048576)+700):(m.requiredVramMB||'');
+  $('e_alias').value=isNew?'':(m.alias||'');$('e_alias').placeholder='default: the key';
+  $('e_notes').value=isNew?'':(m.notes||'');$('eerr').textContent='';
+  $('edit').showModal();
+}
+$('eform').onsubmit=e=>{if(e.submitter&&e.submitter.value==='cancel')return;e.preventDefault();$('esave').click()};
+$('e_path').onchange=()=>{if(editing)return;const f=M.files.find(x=>x.path===$('e_path').value);$('e_vram').value=Math.min(6144,Math.round((f&&f.size||0)/1048576)+700)};
+$('esave').onclick=async()=>{
+  const e={key:$('e_key').value.trim(),name:$('e_name').value,path:$('e_path').value,serverExe:$('e_exe').value,args:$('e_args').value,
+    port:$('e_port').value,requiredVramMB:$('e_vram').value,alias:$('e_alias').value,notes:$('e_notes').value};
+  $('eerr').textContent='Saving…';
+  const r=await api('/api/models',{op:editing?'edit':'add',entry:e,confirm:true});
+  if(r.status===200){$('edit').close();$('msg').textContent=r.j.note||'Saved.';tick();loadModels(false)}else $('eerr').textContent=r.j.error||'Refused.';
+};
+async function showLog(key){$('logt').textContent='Log: '+key;$('logtxt').textContent='Loading…';$('logdlg').showModal();
+  const r=await api('/api/model_log?key='+encodeURIComponent(key));$('logtxt').textContent=r.status===200?(r.j.path+'\n\n'+r.j.text):(r.j.error||'Failed.');
+  $('logtxt').scrollTop=1e9}
+let dlTimer=null;
+async function loadDownloads(){
+  const r=await api('/api/downloads');const D=$('dllist');D.replaceChildren();
+  const list=r.status===200?(r.j.downloads||[]):[];
+  for(const d of list){
+    const row=el('div',null,'mrow');const pct=d.total?Math.min(100,Math.round(100*d.size/d.total)):null;
+    row.append(el('div',base(d.file),'t'),el('div',`${GB(d.size)}${d.total?' of '+GB(d.total)+' ('+pct+'%)':''} · ${d.running?'downloading':'stopped (failed or interrupted)'}`,'d'));
+    const bar=el('div',null,'bar');const i=el('i');i.style.width=(pct||0)+'%';bar.append(i);row.append(bar);
+    const b=el('div',null,'row');b.style.marginTop='6px';
+    if(!d.running&&d.url)b.append(btn('Resume',()=>mop({op:'resume_download',part:d.part})));
+    b.append(btn(d.running?'Cancel':'Delete',()=>mop({op:'cancel_download',part:d.part},`Cancel and delete the partial ${base(d.file)}?`),'danger'));
+    row.append(b);D.append(row);
+  }
+  clearTimeout(dlTimer);
+  if(list.some(d=>d.running))dlTimer=setTimeout(loadDownloads,5000);
+  else if(M&&M.files.some(f=>f.kind==='part'&&/^d:\\models\\/i.test(f.path))!==list.length>0&&Date.now()-lastScan>60000){lastScan=Date.now();loadModels(true)}
+}
+$('dlgo').onclick=async()=>{const url=$('dlurl').value.trim();if(!url)return;
+  const r=await mop({op:'download',url,folder:$('dlfolder').value.trim()},'Download this file to Predator?\n'+url);
+  if(r&&r.status===200){$('dlurl').value='';$('dlfolder').value=''}};
+$('madd').onclick=()=>M&&openEdit(null,null);
+$('mrefresh').onclick=()=>loadModels(true);
+let lastScan=0;
 if(TOKEN)api('/api/status').then(r=>{if(r.status===200)start();else showLogin('')});else showLogin('');
 </script></body></html>
