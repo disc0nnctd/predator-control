@@ -51,6 +51,7 @@ never in llm/gaming mode). If the task is missing, the server falls back to a de
 ## Operate / remove
 
 - Logs: `%LOCALAPPDATA%\predator-control\server.log` (server), `actions.log` (what the page did), `D:\ComfyUI\server.log`.
-- Restart after an update: copy new files, `schtasks /end /tn PredatorControl` then `schtasks /run /tn PredatorControl`.
+- Restart after an update: copy new files, end the python running `server.py` (`schtasks /end` alone leaves it running and
+  the old code keeps serving the NEW index.html), then `schtasks /run /tn PredatorControl`.
 - Remove: `uninstall_predator_control.bat`, and `tailscale serve --https=8793 off`.
 - Updating the bundle copies from the repo: `~/predator-control/deploy/sync.sh` (tests fail if they drift).
