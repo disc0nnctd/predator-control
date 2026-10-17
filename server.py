@@ -959,6 +959,7 @@ def main():
     load_token()
     load_log()
     load_downloads()
+    threading.Thread(target=scan_files, daemon=True).start()  # warm the ~10 s file walk so the Models tab opens fast
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
     print(f"predator-control on 127.0.0.1:{PORT} ({'LOCAL mode, commands run on this machine' if LOCAL else 'ssh to ' + HOST})", flush=True)
     srv.serve_forever()

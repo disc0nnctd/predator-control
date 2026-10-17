@@ -5,7 +5,7 @@
 <style>
 :root{--bg:#10141a;--card:#1a212b;--ink:#e8edf3;--mute:#93a1b3;--ok:#3ec27a;--warn:#e8b339;--bad:#ef5b5b;--acc:#4f9dff;--line:#2a3442}
 *{box-sizing:border-box}
-body{margin:0;font:16px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--ink);padding:12px;max-width:760px;margin:auto}
+body{margin:0;font:16px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--ink);padding:12px;max-width:860px;margin:auto}
 h1{font-size:1.2rem;margin:.2rem 0 .6rem}
 h2{font-size:1rem;margin:1.2rem 0 .4rem;color:var(--mute);font-weight:600}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:8px 0}
@@ -37,6 +37,21 @@ dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);bord
 dialog::backdrop{background:#000a}
 table{width:100%;border-collapse:collapse;font-size:.85rem}td{padding:3px 6px;border-bottom:1px solid var(--line);vertical-align:top}
 .hide{display:none}
+.tabs{display:flex;gap:4px;margin:10px 0 4px;border-bottom:1px solid var(--line);overflow-x:auto}
+.tabs button{background:none;border:0;border-bottom:3px solid transparent;border-radius:0;color:var(--mute);min-height:40px;padding:6px 12px;font-weight:600}
+.tabs button.on{color:var(--ink);border-bottom-color:var(--acc)}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0}
+@media(max-width:520px){.grid{grid-template-columns:1fr 1fr}.grid .tile:last-child{grid-column:1/-1}}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px}
+.tile h3{margin:0;font-size:1rem}.tile p{margin:0;color:var(--mute);font-size:.82rem;flex:1}
+.line{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0}.line+.line{border-top:1px solid var(--line)}
+button.sm{min-height:34px;padding:5px 10px;font-size:.85rem}
+.d{color:var(--mute);font-size:.85rem}
+.kv{grid-template-columns:auto 1fr auto 1fr}
+@media(max-width:520px){.kv{grid-template-columns:auto 1fr}}
+details summary{cursor:pointer}
+.mrow{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.mrow .info{flex:1;min-width:200px}
 .mrow{border-top:1px solid var(--line);padding:8px 0}.mrow:first-child{border-top:0}
 .mrow .t{font-weight:600}.mrow .d{color:var(--mute);font-size:.85rem;word-break:break-all}
 .mrow .row button{min-height:36px;padding:6px 10px;font-size:.88rem}
@@ -56,8 +71,8 @@ pre{white-space:pre-wrap;word-break:break-all;font-size:.75rem;max-height:60vh;o
 
 <div id="app" class="hide">
   <div class="card now" id="now">
-    <div class="row"><span class="big" id="mode">...</span><span id="pill"></span></div>
-    <div id="sub" style="color:var(--mute)"></div>
+    <div class="row" style="justify-content:space-between"><div class="row"><span class="big" id="mode">...</span><span id="pill"></span></div>
+      <span id="sub" style="color:var(--mute);font-size:.9rem"></span></div>
     <div class="bar" title="GPU memory"><i id="gbar" style="width:0"></i></div>
     <div class="kv" id="kv"></div>
   </div>
@@ -65,39 +80,46 @@ pre{white-space:pre-wrap;word-break:break-all;font-size:.75rem;max-height:60vh;o
   <div id="msg"></div>
   <div class="ovr" id="ovr"><label><input type="checkbox" id="override"> <b>I know a job is running</b> (stop or switch anyway; the job will be lost)</label></div>
 
-  <h2>Switch what owns the GPU</h2>
-  <div class="card" data-mode="image"><h3>Image</h3><p>Frees the GPU for the picture engine (ComfyUI). Stops any language model. ComfyUI itself is started below.</p><button data-sw="image">Switch to Image</button></div>
-  <div class="card" data-mode="llm"><h3>Language model</h3><p>Loads one model into the GPU and stops ComfyUI. Loading can take a few minutes. Also closes browsers and chat apps on Predator to free memory.</p>
-    <div class="row"><select id="model" style="flex:1"></select><button data-sw="llm">Switch to this model</button></div></div>
-  <div class="card" data-mode="gaming"><h3>Gaming</h3><p>No models; Predator gets its gaming profile. Stops ComfyUI and any model.</p><button data-sw="gaming">Switch to Gaming</button></div>
-  <div class="card" data-mode="idle"><h3>Idle</h3><p>Stops every model; nothing owns the GPU.</p><button data-sw="idle">Switch to Idle</button></div>
+  <nav class="tabs" id="tabs"><button data-tab="control">Control</button><button data-tab="models">Models</button><button data-tab="files">Files</button><button data-tab="gpu">GPU</button><button data-tab="log">Log</button></nav>
 
-  <h2>Models on Predator</h2>
-  <div class="card"><div class="row" style="justify-content:space-between"><h3>Catalog</h3>
-    <div class="row"><button class="sec" id="madd">+ Add model</button><button class="sec" id="mrefresh">Rescan files</button></div></div>
-    <p>What the “Language model” switch can load. Changes take effect the next time a model is loaded. Every save keeps a backup of the old catalog on Predator.</p>
-    <div id="mlist">Loading…</div></div>
-  <div class="card"><h3>Model files</h3><p id="disks"></p><div id="flist"></div></div>
-  <div class="card"><h3>Download a model</h3>
-    <p>Paste a Hugging Face link to one <code>.gguf</code> file. It is saved under <code>D:\models\&lt;folder&gt;</code> on Predator and keeps downloading if you close this page.</p>
-    <label class="f">Link<input type="text" id="dlurl" placeholder="https://huggingface.co/user/repo/resolve/main/model-Q4_K_M.gguf"></label>
-    <label class="f">Folder (optional, default: repo name)<input type="text" id="dlfolder" placeholder="e.g. qwen3-8b"></label>
-    <div class="row" style="margin-top:8px"><button id="dlgo">Download</button></div>
-    <div id="dllist" style="margin-top:8px"></div></div>
+  <section data-pane="control">
+    <div class="grid">
+      <div class="tile" data-mode="llm" style="grid-column:1/-1"><h3>Language model</h3><p>Loads one model, stops ComfyUI, closes browsers/chat apps. Takes a few minutes.</p>
+        <div class="row"><select id="model" style="flex:1;min-width:0"></select><button data-sw="llm">Load</button></div></div>
+      <div class="tile" data-mode="image"><h3>Image</h3><p>Stops models; GPU free for ComfyUI.</p><button data-sw="image">Switch</button></div>
+      <div class="tile" data-mode="gaming"><h3>Gaming</h3><p>No models, gaming profile.</p><button data-sw="gaming">Switch</button></div>
+      <div class="tile" data-mode="idle"><h3>Idle</h3><p>Stops everything.</p><button data-sw="idle">Switch</button></div>
+    </div>
+    <div class="card"><div class="line"><div><b>ComfyUI</b> <span class="d" id="comfyinfo"></span></div>
+        <div class="row"><button class="sec sm" data-act="comfy_start">Start</button><button class="sec sm" data-act="comfy_stop">Stop</button><button class="sec sm" data-act="comfy_restart">Restart</button></div></div>
+      <div class="line"><div><b>llama-server</b> <span class="d" id="llminfo"></span></div><button class="sec sm" data-act="llama_stop">Stop</button></div></div>
+  </section>
 
-  <h2>What is using the GPU</h2>
-  <div class="card"><div class="row" style="justify-content:space-between"><p id="gpinfo" style="margin:0">Not loaded yet.</p>
-    <button class="sec" id="gprefresh">Refresh</button></div><div id="gplist"></div></div>
+  <section data-pane="models" class="hide">
+    <div class="row" style="justify-content:space-between;margin:6px 0"><span class="d">Used by “Language model”. Changes apply on next load; each save backs up the old catalog.</span>
+      <button class="sm" id="madd">+ Add model</button></div>
+    <div class="card" id="mlist">Loading…</div>
+  </section>
 
-  <h2>Single tools</h2>
-  <div class="card"><h3>ComfyUI (picture engine)</h3><p id="comfyinfo"></p>
-    <div class="row"><button class="sec" data-act="comfy_start">Start</button><button class="sec" data-act="comfy_stop">Stop</button><button class="sec" data-act="comfy_restart">Restart</button></div></div>
-  <div class="card"><h3>Language model server</h3><p id="llminfo"></p>
-    <button class="sec" data-act="llama_stop">Stop llama-server</button></div>
+  <section data-pane="files" class="hide">
+    <div class="row" style="justify-content:space-between;margin:6px 0"><span class="d" id="disks"></span><button class="sec sm" id="mrefresh">Rescan</button></div>
+    <details class="card" id="dlbox"><summary><b>Download from Hugging Face</b></summary>
+      <label class="f">Link to one .gguf file<input type="text" id="dlurl" placeholder="https://huggingface.co/user/repo/resolve/main/model-Q4_K_M.gguf"></label>
+      <div class="row" style="align-items:flex-end"><label class="f" style="flex:1">Folder in D:\models (default: repo name)<input type="text" id="dlfolder" placeholder="e.g. qwen3-8b"></label><button id="dlgo">Download</button></div>
+    </details>
+    <div id="dllist"></div>
+    <div class="card" id="flist"></div>
+  </section>
 
-  <h2>Recent actions</h2>
-  <div class="card"><table id="log"></table></div>
-  <p style="color:var(--mute);font-size:.8rem">Counts and times only; no prompts or text are ever stored here. <a href="#" id="chpw" style="color:var(--mute)">Change password</a> · <a href="#" id="logout" style="color:var(--mute)">Forget token</a></p>
+  <section data-pane="gpu" class="hide">
+    <div class="row" style="justify-content:space-between;margin:6px 0"><span class="d" id="gpinfo">Not loaded yet.</span><div class="row"><label class="d"><input type="checkbox" id="gpall"> show all</label><button class="sec sm" id="gprefresh">Refresh</button></div></div>
+    <div class="card" id="gplist"></div>
+  </section>
+
+  <section data-pane="log" class="hide">
+    <div class="card"><table id="log"></table></div>
+    <p class="d">Counts and times only; no prompts or text are stored. <a href="#" id="chpw" style="color:var(--mute)">Change password</a> · <a href="#" id="logout" style="color:var(--mute)">Forget token</a></p>
+  </section>
 </div>
 
 <dialog id="dlg"><form method="dialog"><p id="dtxt"></p><div class="row" style="justify-content:flex-end"><button class="sec" value="no">Cancel</button><button value="yes" id="dyes">Yes, do it</button></div></form></dialog>
@@ -159,7 +181,6 @@ function render(s){
     rows.push(['Language model',s.llama_running.length?s.llama_running.join(', '):'none running']);
     rows.push(['Last switch to',(s.set_mode||'?')+(s.set_model?' '+s.set_model:'')+(s.set_at?' at '+s.set_at:'')]);
     rows.push(['Power plan',s.power_plan||'?']);
-    rows.push(['Updated',s.time]);
   } else rows.push(['Note','Predator may be asleep, off or off the tailnet.']);
   kv(rows);
   // model list
@@ -189,7 +210,7 @@ async function tick(){
   const r=await api('/api/status');
   if(r.status===200){render(r.j);if(n++%3===0)pollLog()}
 }
-function start(){$('login').classList.add('hide');$('app').classList.remove('hide');tick();clearInterval(timer);timer=setInterval(tick,3000);loadModels(false);loadGpu()}
+function start(){$('login').classList.add('hide');$('app').classList.remove('hide');tick();clearInterval(timer);timer=setInterval(tick,3000);showTab(localStorage.getItem('pc_tab')||'control')}
 
 function ask(text){return new Promise(res=>{$('dtxt').textContent=text;const d=$('dlg');d.onclose=()=>res(d.returnValue==='yes');d.showModal()})}
 
@@ -222,45 +243,44 @@ const base=p=>String(p||'').split('\\').pop();
 function el(tag,txt,cls){const e=document.createElement(tag);if(txt!=null)e.textContent=txt;if(cls)e.className=cls;return e}
 function btn(txt,fn,cls){const b=el('button',txt,cls||'sec');b.type='button';b.onclick=fn;return b}
 async function loadModels(fresh){
-  $('mlist').textContent=fresh?'Scanning Predator (about 10 s)…':($('mlist').textContent||'Loading…');
+  if(fresh||!M)$('mlist').textContent=fresh?'Scanning Predator (about 10 s)…':'Reading Predator…';
   const r=await api('/api/models'+(fresh?'?fresh=1':''));
   if(r.status!==200){$('mlist').textContent=r.j.error||'Could not load.';return}
   M=r.j;renderModels();loadDownloads();
 }
+function mrow(info,actions,title){
+  const d=el('div',null,'mrow line');const i=el('div',null,'info');i.append(...info);if(title)i.title=title;
+  const a=el('div',null,'row');a.append(...actions.filter(Boolean));d.append(i,a);return d}
+function sbtn(t,fn,cls){return btn(t,fn,(cls||'sec')+' sm')}
 function renderModels(){
   const L=$('mlist');L.replaceChildren();
   const cat=M.catalog;
   if(!cat){L.textContent='Could not read the catalog on Predator.';return}
   const running=S&&S.llama_running&&S.llama_running.length?S.set_model:null;
   for(const m of cat.models){
-    const d=el('div',null,'mrow');
-    const t=el('div',m.name+'  ','t');
-    t.append(el('span',m.key,'pill'));
-    if(m.key===cat.defaultModel)t.append(' ',el('span','default','pill ok'));
-    if(m.key===running)t.append(' ',el('span','loaded now','pill warn'));
+    const t=el('div',m.name+' ','t');
+    if(m.key===cat.defaultModel)t.append(el('span','default','pill ok'),' ');
+    if(m.key===running)t.append(el('span','loaded','pill warn'));
     const f=M.files.find(x=>x.path.toLowerCase()===String(m.path).toLowerCase());
-    d.append(t,el('div',`${base(m.path)} (${f?GB(f.size):'FILE MISSING'}) · port ${m.port} · ~${m.requiredVramMB||'?'} MB VRAM · ${base(String(m.serverExe||M.default_exe).replace(/\\[^\\]*$/,''))||'default build'}`,'d'),
-      el('div',m.args||'(no extra arguments)','d'));
-    if(m.notes)d.append(el('div','Note: '+m.notes,'d'));
-    const row=el('div',null,'row');row.style.marginTop='6px';
-    row.append(btn('Load',()=>send({action:'switch',mode:'llm',model:m.key},`Load "${m.name}" on Predator now? ComfyUI and any running model are stopped (a few minutes).`),''),
-      btn('Edit',()=>openEdit(m)),btn('Log',()=>showLog(m.key)));
-    if(m.key!==cat.defaultModel)row.append(btn('Make default',()=>mop({op:'default',key:m.key},`Make "${m.name}" the default model?`)));
-    row.append(btn('Remove',()=>mop({op:'delete',key:m.key},`Remove "${m.name}" from the catalog? The .gguf file stays on disk.`),'danger'));
-    d.append(row);L.append(d);
+    const build=base(String(m.serverExe||M.default_exe).replace(/\\[^\\]*$/,'').replace(/\\(build\\bin|build\\bin\\Release|bin)$/i,''));
+    L.append(mrow([t,el('div',`${m.key} · ${f?GB(f.size):'FILE MISSING'} · :${m.port} · ~${m.requiredVramMB||'?'} MB · ${build}`,'d')],
+      [sbtn('Load',()=>send({action:'switch',mode:'llm',model:m.key},`Load "${m.name}" on Predator now? ComfyUI and any running model are stopped (a few minutes).`),' '),
+       sbtn('Edit',()=>openEdit(m)),sbtn('Log',()=>showLog(m.key)),
+       m.key!==cat.defaultModel&&sbtn('★',()=>mop({op:'default',key:m.key},`Make "${m.name}" the default model?`)),
+       sbtn('✕',()=>mop({op:'delete',key:m.key},`Remove "${m.name}" from the catalog? The .gguf file stays on disk.`),'danger')],
+      `${m.path}\nargs: ${m.args||'-'}${m.notes?'\nnote: '+m.notes:''}`));
   }
-  // files
   $('disks').textContent=Object.entries(M.disks||{}).map(([k,v])=>`${k}: ${GB(v)} free`).join(' · ')+(M.scanned_at?` · scanned ${M.scanned_at}`:'');
   const F=$('flist');F.replaceChildren();
-  for(const f of M.files.filter(x=>x.kind!=='part')){
-    const d=el('div',null,'mrow');
-    d.append(el('div',base(f.path)+(f.kind==='mmproj'?'  (vision projector)':''),'t'),
-      el('div',`${f.path} · ${GB(f.size)} · ${f.time||''}`+(f.used_by.length?` · used by ${f.used_by.join(', ')}`:' · not in the catalog'),'d'));
-    const row=el('div',null,'row');row.style.marginTop='6px';
-    if(f.kind==='model'&&f.name_ok)row.append(btn('Add to catalog',()=>openEdit(null,f.path)));
-    if(!f.name_ok)row.append(el('span','name has unsupported characters; rename it on Predator','d'));
-    if(!f.used_by.length&&f.name_ok)row.append(btn('Delete file',()=>mop({op:'delete_file',path:f.path},`DELETE ${base(f.path)} (${GB(f.size)}) from Predator's disk? This cannot be undone.`),'danger'));
-    d.append(row);F.append(d);
+  const files=M.files.filter(x=>x.kind!=='part').sort((a,b)=>(b.size||0)-(a.size||0));
+  if(!files.length)F.textContent='No .gguf files found.';
+  for(const f of files){
+    const t=el('div',base(f.path)+' ','t');
+    t.append(el('span',f.used_by.length?f.used_by.join(', '):f.kind==='mmproj'?'vision projector':'unused','pill'+(f.used_by.length?' ok':'')));
+    F.append(mrow([t,el('div',`${GB(f.size)} · ${f.path.replace(/\\[^\\]*$/,'')}`,'d')],
+      [f.kind==='model'&&f.name_ok&&sbtn('Add',()=>openEdit(null,f.path)),
+       !f.name_ok&&el('span','unsupported name','d'),
+       !f.used_by.length&&f.name_ok&&sbtn('Delete',()=>mop({op:'delete_file',path:f.path},`DELETE ${base(f.path)} (${GB(f.size)}) from Predator's disk? This cannot be undone.`),'danger')],f.path));
   }
 }
 async function mop(body,text){
@@ -308,13 +328,11 @@ async function loadDownloads(){
   const r=await api('/api/downloads');const D=$('dllist');D.replaceChildren();
   const list=r.status===200?(r.j.downloads||[]):[];
   for(const d of list){
-    const row=el('div',null,'mrow');const pct=d.total?Math.min(100,Math.round(100*d.size/d.total)):null;
-    row.append(el('div',base(d.file),'t'),el('div',`${GB(d.size)}${d.total?' of '+GB(d.total)+' ('+pct+'%)':''} · ${d.running?'downloading':'stopped (failed or interrupted)'}`,'d'));
-    const bar=el('div',null,'bar');const i=el('i');i.style.width=(pct||0)+'%';bar.append(i);row.append(bar);
-    const b=el('div',null,'row');b.style.marginTop='6px';
-    if(!d.running&&d.url)b.append(btn('Resume',()=>mop({op:'resume_download',part:d.part})));
-    b.append(btn(d.running?'Cancel':'Delete',()=>mop({op:'cancel_download',part:d.part},`Cancel and delete the partial ${base(d.file)}?`),'danger'));
-    row.append(b);D.append(row);
+    const pct=d.total?Math.min(100,Math.round(100*d.size/d.total)):null;
+    const bar=el('div',null,'bar');const i=el('i');i.style.width=(pct||0)+'%';bar.append(i);
+    D.append(Object.assign(mrow([el('div',base(d.file),'t'),el('div',`${GB(d.size)}${d.total?' of '+GB(d.total)+' · '+pct+'%':''} · ${d.running?'downloading':'stopped'}`,'d'),bar],
+      [!d.running&&d.url&&sbtn('Resume',()=>mop({op:'resume_download',part:d.part})),
+       sbtn(d.running?'Cancel':'Delete',()=>mop({op:'cancel_download',part:d.part},`Cancel and delete the partial ${base(d.file)}?`),'danger')]),{className:'mrow line card'}));
   }
   clearTimeout(dlTimer);
   if(list.some(d=>d.running))dlTimer=setTimeout(loadDownloads,5000);
@@ -334,16 +352,15 @@ async function loadGpu(){
   const r=await api('/api/gpu_procs');const L=$('gplist');L.replaceChildren();
   const list=r.status===200?r.j.procs:null;
   if(!list){$('gpinfo').textContent='Could not read Predator.';return}
-  $('gpinfo').textContent=`${list.length} process(es) · ${list.reduce((a,p)=>a+p.mem_mb,0)} MB GPU memory · read ${new Date().toLocaleTimeString()}`;
-  for(const p of list){
-    const d=el('div',null,'mrow');const t=el('div',`${p.name}  `,'t');
-    t.append(el('span',KIND[p.kind]||p.kind,'pill'+(p.kind==='system'?'':p.mem_mb>500?' warn':'')));
-    d.append(t,el('div',`pid ${p.pid} · ${p.mem_mb} MB · ${p.util_pct}% GPU`,'d'));
-    if(p.cmd)d.append(el('div',p.cmd.length>160?p.cmd.slice(0,160)+'…':p.cmd,'d'));
-    if(p.kind!=='system'){const row=el('div',null,'row');row.style.marginTop='6px';
-      row.append(btn('Terminate',()=>killProc(p),'danger'));d.append(row)}
-    L.append(d);
+  const big=list.filter(p=>p.mem_mb>=50||p.util_pct>0||p.kind!=='app'&&p.kind!=='system');
+  const shown=$('gpall').checked?list:big;
+  $('gpinfo').textContent=`${list.reduce((a,p)=>a+p.mem_mb,0)} MB in use · ${list.length} processes · ${new Date().toLocaleTimeString()}`;
+  for(const p of shown){
+    const t=el('div',p.name+' ','t');t.append(el('span',KIND[p.kind]||p.kind,'pill'+(p.kind==='system'?'':p.mem_mb>500?' warn':'')));
+    L.append(mrow([t,el('div',`${p.mem_mb} MB · ${p.util_pct}% GPU · pid ${p.pid}`,'d')],
+      [p.kind!=='system'&&sbtn('Terminate',()=>killProc(p),'danger')],p.cmd));
   }
+  if(shown.length<list.length)L.append(el('div',`${list.length-shown.length} small process(es) hidden`,'d'));
 }
 async function killProc(p){
   if(!await ask(`End ${p.name} (pid ${p.pid}, ${p.mem_mb} MB) on Predator? Unsaved work in it is lost.`))return;
@@ -353,6 +370,16 @@ async function killProc(p){
   if(r.status===409&&/Tick/.test(r.j.error||'')){$('ovr').dataset.force='1';$('ovr').classList.add('on')}
   $('override').checked=false;tick();loadGpu();
 }
-$('gprefresh').onclick=loadGpu;
+$('gprefresh').onclick=loadGpu;$('gpall').onchange=loadGpu;
+const loaded={};
+function showTab(t){
+  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===t));
+  document.querySelectorAll('section[data-pane]').forEach(x=>x.classList.toggle('hide',x.dataset.pane!==t));
+  localStorage.setItem('pc_tab',t);
+  if(t==='gpu')loadGpu();
+  if((t==='models'||t==='files')&&!loaded.m){loaded.m=1;loadModels(false)}
+  if(t==='log')pollLog();
+}
+$('tabs').onclick=e=>{const b=e.target.closest('button');if(b)showTab(b.dataset.tab)};
 if(TOKEN)api('/api/status').then(r=>{if(r.status===200)start();else showLogin('')});else showLogin('');
 </script></body></html>
