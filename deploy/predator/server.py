@@ -781,7 +781,7 @@ def gpu_procs():
         if pid <= 4 or (mb < 1 and util < 1):
             continue
         name, cmd = str(p.get("name", ""))[:80], str(p.get("cmd", ""))
-        out.append({"pid": pid, "name": name, "mem_mb": mb, "util_pct": util, "cmd": cmd[:240], "kind": gpu_kind(name, cmd)})
+        out.append({"pid": pid, "name": name, "mem_mb": mb, "util_pct": min(util, 100), "cmd": cmd[:240], "kind": gpu_kind(name, cmd)})
     return sorted(out, key=lambda x: (-x["mem_mb"], -x["util_pct"]))
 
 
