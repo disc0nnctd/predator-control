@@ -13,6 +13,7 @@ Every /api call needs the one-time access token (~/.local/share/predator-control
 import base64, collections, hmac, json, os, re, secrets, subprocess, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import system_controls
 
 IS_WIN = os.name == "nt"
 # LOCAL mode: this server runs ON Predator, so every "remote" command is run directly on this machine instead of over ssh.
@@ -335,6 +336,8 @@ def start_action(body):
             if not isinstance(model, str) or not KEY_RE.match(model) or model not in [m["key"] for m in models_catalog()]:
                 raise Refuse("Unknown model key (not in Predator's model list).", 400)
     with lock:
+        if any(j["running"] and j["domain"] in ("predator", "image-model") for j in system_controls.jobs()["jobs"]):
+            raise Refuse("A Predator system action is still running.")
         if action["running"]:
             raise Refuse(f"Another action is still running ({action['name']}: {action['stage']}).")
         st = status(fresh=True)
@@ -404,6 +407,68 @@ downloads = {}  # part path -> {"url", "total"}; persisted in DATA/downloads.jso
 
 def ps(script):
     return "powershell -NoProfile -NonInteractive -EncodedCommand " + base64.b64encode(script.encode("utf-16-le")).decode()
+
+
+VOICE_STATUS_PS = r"""$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+$t=Get-ScheduledTask -TaskName QwenVoiceStudio
+$c=New-Object Net.Sockets.TcpClient
+try {$up=$c.ConnectAsync('127.0.0.1',7865).Wait(700) -and $c.Connected} catch {$up=$false} finally {$c.Dispose()}
+[pscustomobject]@{running=[bool]$up;enabled=[bool]$t.Settings.Enabled;state=$t.State.ToString()}|ConvertTo-Json -Compress
+"""
+voice_lock = threading.Lock()
+voice_cache = {'t': 0, 'v': None}
+
+
+def voice_status(fresh=False):
+    if not fresh and voice_cache['v'] is not None and time.time()-voice_cache['t'] < 4:
+        return voice_cache['v']
+    try:
+        raw = remote(ps(VOICE_STATUS_PS), timeout=15)
+        value = json.loads(raw.strip().splitlines()[-1])
+    except Exception:
+        value = {'running': None, 'enabled': None, 'state': 'Unknown'}
+    voice_cache.update(t=time.time(), v=value)
+    return value
+
+
+def voice_control(body):
+    if body.get('confirm') is not True:
+        raise Refuse('Confirm the Voice Studio action.', 400)
+    op = body.get('action')
+    if op not in ('start', 'stop', 'restart'):
+        raise Refuse('Unknown Voice Studio action.', 400)
+    if not voice_lock.acquire(blocking=False):
+        raise Refuse('A Voice Studio action is already running.')
+    try:
+        script = "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'\n"
+        if op in ('stop', 'restart'):
+            script += r"""
+Stop-ScheduledTask -TaskName QwenVoiceStudio
+Disable-ScheduledTask -TaskName QwenVoiceStudio|Out-Null
+for($i=0;$i -lt 20;$i++){if((Get-ScheduledTask QwenVoiceStudio).State -ne 'Running'){break};Start-Sleep -Milliseconds 300}
+$pids=@(Get-CimInstance Win32_Process -Filter "Name='python.exe'"|Where-Object {$_.CommandLine -match 'QwenVoice\\private_studio.py|QwenVoice\\app.py'}|ForEach-Object {$_.ProcessId})
+foreach($targetPid in $pids){if(Get-Process -Id $targetPid -ErrorAction SilentlyContinue){$ErrorActionPreference='Continue';& taskkill /PID $targetPid /T /F 2>$null|Out-Null;$ErrorActionPreference='Stop'}}
+"""
+        if op in ('start', 'restart'):
+            script += r"""
+Enable-ScheduledTask -TaskName QwenVoiceStudio|Out-Null
+Start-ScheduledTask -TaskName QwenVoiceStudio
+for($i=0;$i -lt 30;$i++){$c=New-Object Net.Sockets.TcpClient;try{$up=$c.ConnectAsync('127.0.0.1',7865).Wait(300) -and $c.Connected}catch{$up=$false}finally{$c.Dispose()};if($up){break};Start-Sleep -Milliseconds 500}
+"""
+        script += "\n" + VOICE_STATUS_PS
+        raw = remote(ps(script), timeout=45)
+        try:
+            result = json.loads(raw.strip().splitlines()[-1])
+        except Exception:
+            raise Refuse('Voice Studio action could not be verified. Check the scheduled task.', 502)
+        expected = op != 'stop'
+        if result.get('running') is not expected:
+            raise Refuse('Voice Studio did not reach the requested state. Check its service log.', 502)
+        voice_cache.update(t=time.time(), v=result)
+        log('voice_' + op, '', 'completed')
+        return result
+    finally:
+        voice_lock.release()
 
 
 def ps_quote(s):
@@ -860,6 +925,33 @@ def token_ok(h):
     return ok
 
 
+def memory_status():
+    """Read this server host's Linux memory; never confuse it with remote Predator."""
+    if IS_WIN or not Path("/proc/meminfo").exists():
+        return {"supported": False, "host": __import__("socket").gethostname()}
+    info = {}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        key, value = line.split(":", 1)
+        info[key] = int(value.split()[0]) * 1024
+    procs = []
+    for status_file in Path("/proc").glob("[0-9]*/status"):
+        try:
+            fields = dict(line.split(":", 1) for line in status_file.read_text().splitlines() if ":" in line)
+            swapped = int(fields.get("VmSwap", "0 kB").split()[0]) * 1024
+            if swapped:
+                procs.append({"pid": int(status_file.parent.name), "name": fields["Name"].strip(), "swap": swapped})
+        except (OSError, ValueError, KeyError):
+            continue
+    counters = dict(line.split() for line in Path("/proc/vmstat").read_text().splitlines())
+    return {"supported": True, "host": __import__("socket").gethostname(),
+            "total": info["MemTotal"], "available": info["MemAvailable"],
+            "swap_total": info["SwapTotal"], "swap_used": info["SwapTotal"] - info["SwapFree"],
+            "swappiness": int(Path("/proc/sys/vm/swappiness").read_text()),
+            "swap_in": int(counters["pswpin"]), "swap_out": int(counters["pswpout"]),
+            "page_size": os.sysconf("SC_PAGE_SIZE"), "sample_time": time.monotonic(),
+            "procs": sorted(procs, key=lambda p: p["swap"], reverse=True)[:10]}
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -884,8 +976,19 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self.path.split("?")[0]
+        if p in ("/api/system/capabilities", "/api/system/jobs", "/api/system/monitor"):
+            if not self.auth():
+                return
+            fn = {"/api/system/capabilities": system_controls.capabilities,
+                  "/api/system/jobs": system_controls.jobs,
+                  "/api/system/monitor": system_controls.monitor_status}[p]
+            return self.send(200, fn())
         if p in ("/", "/index.html"):
             return self.send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
+        if p == "/api/memory" and self.auth():
+            return self.send(200, memory_status())
+        if p == "/api/voice" and self.auth():
+            return self.send(200, voice_status())
         if p == "/api/status" and self.auth():
             return self.send(200, status())
         if p == "/api/log" and self.auth():
@@ -906,6 +1009,32 @@ class H(BaseHTTPRequestHandler):
             self.send(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path == "/api/system/run":
+            if not self.auth():
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 4096:
+                    return self.send(400, {"error": "Invalid request size."})
+                body = json.loads(self.rfile.read(length))
+                request, mutates = system_controls.validate(body)
+                with lock:
+                    if mutates and request['domain'] in ('predator', 'image-model'):
+                        if action['running'] or voice_lock.locked():
+                            raise Refuse("Another Predator action is running.")
+                        if request['domain'] == 'image-model' or request['action'] == 'sleep':
+                            st = status(fresh=True)
+                            if st['busy']['busy']:
+                                raise Refuse("A picture job is running. Wait before changing Predator.")
+                    return self.send(202, system_controls.submit(body, log))
+            except (ValueError, TypeError):
+                return self.send(400, {"error": "Invalid control request."})
+            except system_controls.ControlError as e:
+                return self.send(e.code, {"error": str(e)})
+            except Refuse as e:
+                return self.send(e.code, {"error": e.msg})
+            except Exception:
+                return self.send(500, {"error": "Could not start system control."})
         if self.path == "/api/password":  # the owner picks their own password (replaces the token; the file stays 600)
             if not self.auth():
                 return None
@@ -923,7 +1052,7 @@ class H(BaseHTTPRequestHandler):
             TOKEN = new
             log("password", "", "changed")
             return self.send(200, {"ok": True})
-        if self.path in ("/api/models", "/api/kill"):
+        if self.path in ("/api/models", "/api/kill", "/api/voice"):
             if not self.auth():
                 return None
             try:
@@ -933,7 +1062,10 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 return self.send(400, {"error": "Bad request."})
             try:
-                return self.send(200, model_op(body) if self.path == "/api/models" else kill_proc(body))
+                with lock:
+                    if any(j["running"] and j["domain"] in ("predator", "image-model") for j in system_controls.jobs()["jobs"]):
+                        raise Refuse("A Predator system action is still running.")
+                    return self.send(200, voice_control(body) if self.path == "/api/voice" else model_op(body) if self.path == "/api/models" else kill_proc(body))
             except Refuse as e:
                 return self.send(e.code, {"error": e.msg})
             except Exception as e:

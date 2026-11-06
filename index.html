@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Predator control</title>
+<title>Control Centre</title>
 <style>
 :root{--bg:#10141a;--card:#1a212b;--ink:#e8edf3;--mute:#93a1b3;--ok:#3ec27a;--warn:#e8b339;--bad:#ef5b5b;--acc:#4f9dff;--line:#2a3442}
 *{box-sizing:border-box}
@@ -59,8 +59,14 @@ label.f{display:block;font-size:.85rem;color:var(--mute);margin-top:8px}
 label.f input,label.f select,label.f textarea{display:block;width:100%;margin-top:2px;font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line);background:#0c1117;color:var(--ink)}
 #edit{max-width:560px}
 pre{white-space:pre-wrap;word-break:break-all;font-size:.75rem;max-height:60vh;overflow:auto;background:#0c1117;padding:8px;border-radius:8px}
+#machine-tabs{margin-bottom:20px}
+.system-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px;align-items:start}
+.system-grid .card{margin:0}.system-grid summary{font-weight:600}.system-output{overflow-wrap:anywhere}
+.system-output pre{max-height:320px}.system-output th{text-align:left;padding:4px 6px;color:var(--mute)}
+h2{font-size:1.25rem;margin:0 0 6px}
 </style></head><body>
-<h1>Predator control</h1>
+<h1>Control Centre</h1>
+
 
 <div id="login" class="card hide">
   <h3>Access token</h3>
@@ -70,6 +76,35 @@ pre{white-space:pre-wrap;word-break:break-all;font-size:.75rem;max-height:60vh;o
 </div>
 
 <div id="app" class="hide">
+<nav class="tabs" id="machine-tabs" aria-label="Machine navigation">
+<button type="button" data-machine="dcmini" aria-controls="dcmini-controls">dcmini</button>
+<button type="button" data-machine="predator" aria-controls="predator-controls">Predator</button>
+</nav>
+<p class="d" id="system-integration-status">Loading system controls…</p>
+<details class="card"><summary>Recent system actions</summary><div id="system-jobs" aria-live="polite"></div></details>
+<section id="dcmini-controls" aria-labelledby="dcmini-heading">
+<h2 id="dcmini-heading">dcmini controls</h2>
+<p class="d">Linux server · health, services, cooling, storage and network</p>
+<div class="card"><h3>Monitoring</h3><p class="d" id="system-monitor-time">Checking…</p><pre id="system-monitor" aria-live="polite"></pre></div>
+<div class="card"><h3>Memory and swap · <span id="memory-host">server host</span></h3>
+<p id="memory-summary">Checking memory…</p><p id="memory-activity"></p>
+<details><summary>Optimization options</summary>
+<p>Swap can stay full after memory pressure has passed. Watch swap activity and available memory before changing settings.</p>
+<label class="f">Swap preference <select id="memory-preset"><option value="60">Standard (60)</option><option value="20">Prefer keeping apps in memory (20)</option><option value="10">Low swap preference (10)</option></select></label>
+<p>Lower values may reduce future swapping, but leave less room for file cache. They do not empty existing swap. These commands apply to the host named above, not the remote Predator computer.</p>
+<pre id="memory-command"></pre><button class="sec sm" id="memory-copy">Copy command</button>
+<p>Run with administrator access on this host. The change lasts until reboot. Choose Standard to undo it.</p>
+<p>For qBittorrent, reduce its memory or cache allowance if available in its settings, or reduce active torrents. Pause unused model servers and background services through their own controls to release memory.</p>
+<p>Avoid routinely clearing file caches or disabling swap: both can make workloads slower or interrupt them.</p>
+</details><details><summary>Largest process swap users</summary><p>Shared memory may account for swap that is not listed here.</p><table><tbody id="memory-procs"></tbody></table></details></div>
+<div id="dcmini-system-controls" class="system-grid"></div>
+</section>
+<section id="predator-controls" class="hide" aria-labelledby="predator-heading">
+<h2 id="predator-heading">Predator controls</h2>
+<p class="d">Windows PC · desktop, power, models, graphics, files and Voice Studio</p>
+<div id="predator-system-controls" class="system-grid"></div>
+<div class="card"><h3>Voice Studio</h3><p id="voice-status">Checking status…</p><div class="row"><button class="sec sm" data-voice="start">Start</button><button class="sec sm" data-voice="stop">Stop</button><button class="sec sm" data-voice="restart">Restart</button><a style="color:var(--acc)" href="https://predator.tail1e3236.ts.net:7865/" target="_blank" rel="noopener">Open Voice Studio</a></div><p class="d" id="voice-message"></p></div>
+
   <div class="card now" id="now">
     <div class="row" style="justify-content:space-between"><div class="row"><span class="big" id="mode">...</span><span id="pill"></span></div>
       <span id="sub" style="color:var(--mute);font-size:.9rem"></span></div>
@@ -120,6 +155,7 @@ pre{white-space:pre-wrap;word-break:break-all;font-size:.75rem;max-height:60vh;o
     <div class="card"><table id="log"></table></div>
     <p class="d">Counts and times only; no prompts or text are stored. <a href="#" id="chpw" style="color:var(--mute)">Change password</a> · <a href="#" id="logout" style="color:var(--mute)">Forget token</a></p>
   </section>
+</section>
 </div>
 
 <dialog id="dlg"><form method="dialog"><p id="dtxt"></p><div class="row" style="justify-content:flex-end"><button class="sec" value="no">Cancel</button><button value="yes" id="dyes">Yes, do it</button></div></form></dialog>
@@ -203,14 +239,35 @@ function render(s){
   $('llminfo').textContent=s.reachable?(s.llama_running.length?'Running: '+s.llama_running.join(', '):'None running.'):'';
 }
 
+let memoryPrevious=null;
+function memoryCommand(){$('memory-command').textContent='sudo sysctl -w vm.swappiness='+$('memory-preset').value}
+$('memory-preset').onchange=memoryCommand;
+$('memory-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('memory-command').textContent);$('memory-copy').textContent='Copied'}catch(e){$('memory-copy').textContent='Select and copy the command above'}};
+memoryCommand();
+async function pollMemory(){
+ try{
+  const r=await api('/api/memory');if(r.status!==200){$('memory-summary').textContent='Memory status unavailable.';return}
+  const m=r.j;$('memory-host').textContent=m.host;
+  if(!m.supported){$('memory-summary').textContent='Memory controls are available on the Linux server host.';$('memory-preset').closest('details').hidden=true;return}
+  const gb=x=>(x/1073741824).toFixed(1)+' GiB';
+  $('memory-summary').textContent=gb(m.available)+' available / '+gb(m.total)+' total · Swap '+gb(m.swap_used)+' / '+gb(m.swap_total)+' · Current swap preference '+m.swappiness;
+  if(memoryPrevious){const dt=m.sample_time-memoryPrevious.sample_time;if(dt>0){const rate=k=>Math.max(0,(m[k]-memoryPrevious[k])*m.page_size/dt/1048576).toFixed(2);$('memory-activity').textContent='Swap reads: '+rate('swap_in')+' MiB/s · writes: '+rate('swap_out')+' MiB/s'}}
+  memoryPrevious=m;const t=$('memory-procs');t.replaceChildren();for(const p of m.procs){const tr=t.insertRow();for(const v of [p.name,'Process '+p.pid,gb(p.swap)])tr.insertCell().textContent=v}
+ }catch(e){$('memory-summary').textContent='Memory status unavailable.'}
+}
+
+let voicePending=false;
+async function pollVoice(){if(voicePending)return;const r=await api('/api/voice');if(r.status!==200){$('voice-status').textContent='Status unavailable';return}const v=r.j;$('voice-status').textContent=(v.running===true?'Running':v.running===false?'Off':'Status unknown')+(v.enabled===false?' · automatic startup disabled':'');document.querySelectorAll('[data-voice]').forEach(b=>b.disabled=voicePending||(b.dataset.voice==='start'&&v.running===true)||(b.dataset.voice==='stop'&&v.running===false))}
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-voice]');if(!b||voicePending)return;const op=b.dataset.voice;const message=op==='start'?'Start Voice Studio?':op==='stop'?'Turn off Voice Studio and disable automatic startup? Active tasks will stop; saved files are kept.':'Restart Voice Studio? Active tasks will stop and profiles need unlocking again.';if(!await ask(message))return;voicePending=true;document.querySelectorAll('[data-voice]').forEach(x=>x.disabled=true);$('voice-message').textContent='Working…';try{const r=await api('/api/voice',{action:op,confirm:true});$('voice-message').textContent=r.status===200?'Done.':r.j.error||'Action failed.'}catch(err){$('voice-message').textContent='Connection failed.'}finally{voicePending=false;await pollVoice()}});
+
 async function pollLog(){const r=await api('/api/log');if(r.status!==200)return;const t=$('log');t.replaceChildren();for(const e of r.j.log.slice().reverse().slice(0,15)){const tr=t.insertRow();[e.t.slice(5),e.action+(e.detail?' '+e.detail:'')+(e.override?' (override)':''),e.result].forEach(v=>{tr.insertCell().textContent=v})}}
 
 let timer=null,n=0;
 async function tick(){
   const r=await api('/api/status');
-  if(r.status===200){render(r.j);if(n++%3===0)pollLog()}
+  if(r.status===200){render(r.j);if(n++%3===0){pollLog();pollVoice();pollMemory()}}
 }
-function start(){$('login').classList.add('hide');$('app').classList.remove('hide');tick();clearInterval(timer);timer=setInterval(tick,3000);showTab(localStorage.getItem('pc_tab')||'control')}
+function start(){initSystemControls();showMachine(localStorage.getItem('pc_machine')||'dcmini');$('login').classList.add('hide');$('app').classList.remove('hide');tick();clearInterval(timer);timer=setInterval(tick,3000);showTab(localStorage.getItem('pc_tab')||'control')}
 
 function ask(text){return new Promise(res=>{$('dtxt').textContent=text;const d=$('dlg');d.onclose=()=>res(d.returnValue==='yes');d.showModal()})}
 
@@ -371,6 +428,17 @@ async function killProc(p){
   $('override').checked=false;tick();loadGpu();
 }
 $('gprefresh').onclick=loadGpu;$('gpall').onchange=loadGpu;
+function showMachine(machine){
+  if(!['dcmini','predator'].includes(machine))machine='dcmini';
+  for(const name of ['dcmini','predator'])$(name+'-controls').classList.toggle('hide',name!==machine);
+  document.querySelectorAll('#machine-tabs button').forEach(b=>{
+    const selected=b.dataset.machine===machine;
+    b.classList.toggle('on',selected);
+    b.setAttribute('aria-pressed',String(selected));
+  });
+  localStorage.setItem('pc_machine',machine);
+}
+$('machine-tabs').onclick=e=>{const b=e.target.closest('button[data-machine]');if(b)showMachine(b.dataset.machine)};
 const loaded={};
 function showTab(t){
   document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===t));
@@ -381,5 +449,81 @@ function showTab(t){
   if(t==='log')pollLog();
 }
 $('tabs').onclick=e=>{const b=e.target.closest('button');if(b)showTab(b.dataset.tab)};
+let systemReady=false,systemPolling=false,systemSubmitting=false,systemBusy=false,systemJobs=[],systemGroups=[];
+const systemCards=new Map();
+function systemText(value){return value===null||value===undefined?'Unknown':typeof value==='boolean'?(value?'Yes':'No'):String(value)}
+function systemResult(container,result){
+ container.replaceChildren();
+ const message=document.createElement('p');message.textContent=result.message||'';message.style.color=result.ok?'var(--ok)':'var(--warn)';container.append(message);
+ function render(value,parent){
+  if(value===null||typeof value!=='object'){const text=document.createElement('pre');text.textContent=systemText(value);parent.append(text);return}
+  if(Array.isArray(value)){
+   if(!value.length){const p=document.createElement('p');p.textContent='None';parent.append(p);return}
+   if(value.every(x=>x&&typeof x==='object'&&!Array.isArray(x))){
+    const keys=[...new Set(value.flatMap(x=>Object.keys(x)))];const wrap=document.createElement('div');wrap.style.overflowX='auto';const table=document.createElement('table');const head=table.createTHead().insertRow();for(const k of keys){const th=document.createElement('th');th.textContent=k.replaceAll('_',' ');head.append(th)}
+    for(const item of value){const row=table.insertRow();for(const k of keys){const cell=row.insertCell();const v=item[k];if(v&&typeof v==='object')render(v,cell);else cell.textContent=systemText(v)}}wrap.append(table);parent.append(wrap);return;
+   }
+   for(const item of value)render(item,parent);return;
+  }
+  for(const [key,v] of Object.entries(value)){const label=document.createElement('strong');label.textContent=key.replaceAll('_',' ');parent.append(label);render(v,parent)}
+ }
+ if(result.data)render(result.data,container);
+}
+function systemButtons(){document.querySelectorAll('[data-system-run]').forEach(b=>b.disabled=systemBusy||systemSubmitting)}
+function addSystemCard(group){
+ const card=document.createElement('details');card.className='card';const heading=document.createElement('summary');heading.textContent=group.title;card.append(heading);
+ const note=document.createElement('p');note.className='d';note.textContent=group.note;card.append(note);
+ const form=document.createElement('form');const label=document.createElement('label');label.className='f';label.textContent='Action';const select=document.createElement('select');for(const action of group.actions){const option=document.createElement('option');option.value=action.action;option.textContent=action.label;select.append(option)}label.append(select);form.append(label);
+ let target=null,wait=null,duration=null;
+ function field(title,type,placeholder){const label=document.createElement('label');label.className='f';label.textContent=title;const input=document.createElement('input');input.type=type;input.placeholder=placeholder;label.append(input);form.append(label);return input}
+ if(group.target){target=field('Target','text',group.target);if(group.domain==='llm')target.value='primary'}
+ if(group.wait){wait=field('Wait for recovery or wake (seconds)','number','30');wait.min=5;wait.max=300;wait.value=group.domain==='predator'?90:30}
+ if(group.duration){duration=field('Automatic stop after (minutes)','number','60');duration.min=5;duration.max=240;duration.value=60}
+ const button=document.createElement('button');button.type='submit';button.dataset.systemRun=group.domain;button.textContent='Run';button.style.marginTop='10px';form.append(button);card.append(form);
+ const output=document.createElement('div');output.className='system-output';output.setAttribute('aria-live','polite');card.append(output);
+ form.onsubmit=async e=>{
+  e.preventDefault();if(systemBusy||systemSubmitting)return;
+  const spec=group.actions.find(x=>x.action===select.value);
+  let targetValue=target?target.value.trim():'';
+  if((group.domain==='image-model'&&spec.action==='list')||['status','summary','events','list','scan','recommend','peers','netcheck','exit-node-list','exit-node-off'].includes(spec.action))targetValue='';
+  if(spec.mutates&&!await ask(group.title+': '+spec.label+(targetValue?' ('+targetValue+')':'')+'?\n'+group.note))return;
+  const body={domain:group.domain,action:spec.action,target:targetValue};if(spec.mutates)body.confirm=true;if(wait)body.wait_seconds=Number(wait.value);if(duration)body.duration_minutes=Number(duration.value);
+  systemSubmitting=true;systemButtons();output.textContent='Starting…';
+  try{const r=await api('/api/system/run',body);if(r.status!==202){systemResult(output,{ok:false,message:r.j.error||'Could not start action.'});return}
+   systemBusy=true;output.textContent='Running. You can switch tabs while this finishes.';await pollSystemJobs();
+  }catch(e){systemResult(output,{ok:false,message:'Connection lost. Check recent actions before retrying.'})}
+  finally{systemSubmitting=false;systemButtons()}
+ };
+ systemCards.set(group.domain,{card,output});$(group.host+'-system-controls').append(card);
+}
+async function initSystemControls(){
+ if(systemReady)return;
+ try{const r=await api('/api/system/capabilities');if(r.status!==200)return;systemReady=true;
+  if(!r.j.supported){$('system-integration-status').textContent=r.j.message;return}
+  $('system-integration-status').textContent='';systemGroups=r.j.groups;for(const group of systemGroups)addSystemCard(group);
+  await Promise.all([pollSystemJobs(),pollSystemMonitor()]);
+ }catch(e){$('system-integration-status').textContent='System controls unavailable. Refresh to retry.';systemReady=false}
+}
+async function pollSystemJobs(){
+ if(systemPolling||!TOKEN||!systemReady)return;systemPolling=true;
+ try{const r=await api('/api/system/jobs');if(r.status!==200)return;systemJobs=r.j.jobs||[];systemBusy=systemJobs.some(j=>j.running);systemButtons();
+  for(const group of systemGroups){const job=systemJobs.filter(j=>j.domain===group.domain).at(-1);const entry=systemCards.get(group.domain);if(!job||!entry)continue;if(job.running)entry.output.textContent='Running '+job.action+'…';else systemResult(entry.output,job.result)}
+  const recent=$('system-jobs');recent.replaceChildren();
+  for(const job of systemJobs.slice(-8).reverse()){const row=document.createElement('p');row.textContent=new Date(job.started*1000).toLocaleTimeString()+' · '+job.domain+' / '+job.action+' · '+(job.running?'Running':job.result.ok?'Completed':'Failed');recent.append(row)}
+  if(!systemJobs.length)recent.textContent='No system actions in this server session.';
+ }catch(e){$('system-jobs').textContent='Action status unavailable. Reconnect before retrying a change.'}
+ finally{systemPolling=false}
+}
+async function pollSystemMonitor(){
+ if(!TOKEN||!systemReady)return;
+ try{const r=await api('/api/system/monitor');if(r.status!==200)return;const m=r.j,lines=[];
+  lines.push('Root disk: '+m.root_used_pct+'% used');if(m.temperature_c!==null)lines.push('Temperature: '+m.temperature_c+' °C');if(m.load.length)lines.push('System load: '+m.load.map(x=>x.toFixed(2)).join(' / '));
+  const s=m.monitor;if(s.updated){lines.push('Discord monitor last checked: '+new Date(s.updated*1000).toLocaleString());if(Date.now()/1000-s.updated>180)lines.push('Monitor state is stale.');lines.push('Internet at last check: '+(s.connectivity||'unknown'));if(s.memory_alert)lines.push('Monitor flagged low available memory or nearly full swap.');if(s.disk_alert)lines.push('Monitor flagged low disk space.');for(const [category,at] of Object.entries(s.event_alerted_at||{}))if(at)lines.push('Last '+category+' fault alert: '+new Date(at*1000).toLocaleString())}else lines.push('Discord monitor state unavailable. Use System health for current checks.');
+  $('system-monitor').textContent=lines.join('\n');$('system-monitor-time').textContent='Updated '+new Date(m.sample_time*1000).toLocaleTimeString();
+ }catch(e){$('system-monitor-time').textContent='Monitoring unavailable.'}
+}
+setInterval(()=>{if(TOKEN&&systemReady)pollSystemJobs()},2500);
+setInterval(()=>{if(TOKEN&&systemReady)pollSystemMonitor()},30000);
+
 if(TOKEN)api('/api/status').then(r=>{if(r.status===200)start();else showLogin('')});else showLogin('');
 </script></body></html>

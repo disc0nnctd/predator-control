@@ -1,7 +1,7 @@
-# Predator control
+# Control Centre
 
 Private page to see and change which model owns Predator's GPU (image / LLM <key> / gaming / idle), start/stop ComfyUI,
-stop a stray llama-server. Stdlib Python `server.py` + one `index.html`, `127.0.0.1:8793`. Data: `~/.local/share/predator-control`.
+stop a stray llama-server. Python `server.py`, `system_controls.py` and `index.html`, `127.0.0.1:8793`. Data: `~/.local/share/predator-control`.
 
 ## Install (NOT done for you)
 
@@ -56,3 +56,21 @@ Predator can only end processes of its own user.
 ## Tests
 
 `python3 ~/predator-control/tests/check.py` uses a fake Predator (never touches the real one). `--live` adds one read-only real status read.
+
+## Memory and swap
+
+Control Centre shows memory on the host running server.py, separately from the remote Predator GPU. The authenticated /api/memory endpoint reads Linux memory counters and the largest process swap users. Swap activity is calculated between samples. The optimization panel offers temporary swap preference commands requiring administrator access on that host; it never applies them automatically. Standard (60) restores the usual value; reboot restores the configured boot value. No privilege changes are required for the dashboard.
+
+## Discord bot controls in Control Centre
+
+The dcmini and Predator navigation buttons separate host controls. `system_controls.py` loads the existing SysBear handlers from `/home/notdc/projects/miniclaw/plugins/systembear-control` and the installed fan plugin; it does not use Discord or send messages. The router channel handler uses its existing local dependency and credential setup.
+
+- dcmini: system health/events, disk usage and cleanup review, fan mode, expiring primary LLM service, media health/recovery/history, on-demand TradingView, Bluetooth, saved Wi-Fi, router surveys/channel selection, power profile, Tailscale devices/diagnostics/login/exit nodes.
+- Predator: full status, wake, display on/off, lock, sleep and image-model selection. Existing mode, catalog, file, GPU and Voice Studio controls remain in this tab.
+- Monitoring: host temperatures, load, disk use and the existing Discord health monitor's saved connectivity/pressure/fault state. Old monitor state is explicitly marked stale. Hardware fault details are available under System health. This page never runs the alert sender.
+- Authenticated API: GET `/api/system/capabilities`, `/api/system/jobs`, `/api/system/monitor`; POST `/api/system/run`. The server validates domain/action, target length, wait/duration ranges and explicit confirmation for changes. No arbitrary commands or unit names are accepted.
+- System actions execute in a bounded background queue, one at a time, so Wi-Fi/exit-node rollback can finish after a browser disconnects. Recent results survive tab changes/reloads during the server session; restart clears these results. Logs store domain/action/outcome, never targets or login links.
+- The user service allows the existing sudo helpers to execute (`NoNewPrivileges=false`, `PrivateTmp=false`; a user-service private temporary directory otherwise creates a user namespace in which sudo cannot run). Sudo rights are still defined by the existing root-owned rules and helpers; no new sudoers grants are installed. Reinstall the updated service and reload systemd when upgrading an older deployment. Monitoring alone needs no elevated privileges.
+- Windows bundles include the adapter so the app still starts; SysBear integration is marked unavailable there because its handlers live on dcmini. Use dcmini's Control Centre for the combined controls.
+
+Validation: `python3 tests/system_controls_check.py`, `python3 tests/check.py`, `python3 tests/voice_check.py`.

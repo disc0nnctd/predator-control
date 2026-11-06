@@ -153,7 +153,7 @@ check(call("/api/status", token="nope")[0] == 401, "wrong token -> 401")
 check(call("/api/action", {"action": "idle"}, token="nope")[0] == 401, "action needs token")
 check(call("/api/status")[0] == 200, "right token -> 200")
 page = urllib.request.urlopen(BASE + "/").read()
-check(b"Predator control" in page and b"sessionStorage" in page, "page served and keeps token in sessionStorage")
+check(b"Control Centre" in page and b"sessionStorage" in page, "page served and keeps token in sessionStorage")
 for _ in range(12): call("/api/status", token="x")
 check(call("/api/status")[0] == 429, "brute force locks out (429)")
 S.fails.clear()
@@ -368,7 +368,7 @@ check(S.imagine_jobs() is None, "Imagine unreachable -> None (unknown)")
 S.cache["t"] = 0
 check(call("/api/status")[1]["imagine"] is None, "status still works with Imagine unreachable")
 # deploy bundle copies must match the source
-for f in ("server.py", "index.html"):
+for f in ("server.py", "index.html", "system_controls.py"):
     b = Path(S.__file__).parent / "deploy/predator" / f
     check(b.exists() and b.read_bytes() == (Path(S.__file__).parent / f).read_bytes(), f"deploy/predator/{f} is in sync (run deploy/sync.sh)")
 

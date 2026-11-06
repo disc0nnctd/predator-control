@@ -1,5 +1,5 @@
 [Unit]
-Description=Predator control (private GPU model switcher)
+Description=Control Centre (dcmini and Predator)
 After=network.target
 
 [Service]
@@ -8,8 +8,10 @@ Restart=on-failure
 RestartSec=5
 # data (token + action log, no prompts) lives only in ~/.local/share/predator-control
 UMask=0077
-NoNewPrivileges=true
-PrivateTmp=true
+# SysBear uses existing narrowly allowlisted sudo helpers for fan/power/LLM controls.
+NoNewPrivileges=false
+# User-service PrivateTmp creates a user namespace that blocks the sudo helpers.
+PrivateTmp=false
 # keep a detached `ssh` that holds ComfyUI on Predator alive across a restart of this service
 KillMode=process
 

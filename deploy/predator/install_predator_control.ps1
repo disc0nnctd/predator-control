@@ -8,7 +8,7 @@ param([string]$User = 'dcmini', [string]$Dest = 'C:\Users\dcmini\predator-contro
 $ErrorActionPreference = 'Stop'
 $src = Split-Path -Parent $MyInvocation.MyCommand.Path
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-foreach ($f in 'server.py','index.html','start_predator_control.ps1','start_comfyui.bat') { Copy-Item -Force (Join-Path $src $f) $Dest }
+foreach ($f in 'server.py','index.html','system_controls.py','start_predator_control.ps1','start_comfyui.bat') { Copy-Item -Force (Join-Path $src $f) $Dest }
 
 $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType S4U -RunLevel Limited
 $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden `
